@@ -27,7 +27,6 @@ VERSION=0.9.2
 #           submit_da_script.bash
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
-# TODO: add nc_compress
 ########################################################################
 
 ########################################################################
@@ -184,7 +183,7 @@ fi
 
 # add directory with utility scripts to PATH and check if all required commands are available
 export PATH="${script_dir}:${script_dir}/util:${PATH}"
-for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice ; do 
+for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice nc_compress ; do 
     command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
 done
 
