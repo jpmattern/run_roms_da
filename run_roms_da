@@ -27,6 +27,7 @@ VERSION=0.9.2
 #           submit_da_script.bash
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
+# TODO: add nc_compress
 ########################################################################
 
 ########################################################################
