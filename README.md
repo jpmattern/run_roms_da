@@ -49,7 +49,25 @@ myrundir
 ```
 Here, `run_roms_da.config` is the configuration file for the run and `run_roms_da.log` is the log file containing a copy of the output of `run_roms_da`. The directory `run` contains the current ROMS run (`38840` in each file name indicates the start time of the cycle in days since the ROMS reference date). The output of previous cycles is moved to and stored in the `output` directory; which files are saved can be configured in `run_roms_da.config`.
 
-Note that the `*.in` input files and the ROMS data files (`ocean_ini_*.nc`, `ocean_stdi_*.nc`) are copies of the files specified in `run_roms_da.config`, and `ocean_obs_38840.nc` is a sliced copy of the ROMS observation file specified in `run_roms_da.config`. 
+### Note
+
+The `*.in` input files and the ROMS data files (`ocean_ini_*.nc`, `ocean_stdi_*.nc`) are copies of the files specified in `run_roms_da.config`, and `ocean_obs_38840.nc` is a sliced copy of the ROMS observation file specified in `run_roms_da.config`. The copying is meant to ensure that the original ROMS data files remain unchanged by the call to `run_roms_da` and subsequent ROMS calls. 
+
+## The configuration file
+
+Both `run_roms_da` and `run_roms` use a single configuration file to configure the ROMS simulations which allow modifications to the ROMS input file parameters (like `NAVG` in the `ocean.in` file). The philosophy behind this approach is to keep a small number of template input files containing parameters suitable for a wide range of ROMS simulations, and then modify copies of these templates for each individual simulation.
+
+The configuration file for `run_roms_da` is considerably longer than that for `run_roms` because more information is required for data assimilation experiments than for non-assimilative simulations. All parameters that need to be set have descriptions in the configuration file.
+
+Both configuration files permit modification of ROMS `ocean.in` file parameters via the `paramchanges_ocean` variable which is a bash array. To change the ROMS timesteps between writing time-averaged data (`NAVG`), change the ROMS boundary file (`BRYNAME`) and modify the output of temperature into history files (`Hout(idTvar)`), use for example:
+```
+paramchanges_ocean=(
+NAVG=12
+BRYNAME="myromsdir/bry/ocean_bry.nc"
+"Hout(idTvar)"="T F"
+)
+```
+Note the use of `"` to avoid syntax errors in the case of `"Hout(idTvar)"` and permit the setting of values with spaces in the case of `"T F"`.
 
 
 ## Authors
