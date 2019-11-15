@@ -1,19 +1,11 @@
 #!/bin/bash
 ########################################################################
 #                                                                      #
-#  This script is used to run ROMS 4DVar data assimilation            #
+#  This script is used to run ROMS 4DVar data assimilation             #
 #                                                                      #
 ########################################################################
 #                                                                      #
 #  Written by Paul Mattern                                             #
-#  - previously called submit_da_script.bash                           #
-#  - not constrained to incremental 4DVar                              #
-#  - made more modular: configuration file + this executable           #
-#  - added log file output for this script                             #
-#  - use of rif_setvar                                                 #
-#  - added timing of each cycle                                        #
-#  - restart option (--restart / -r)                                   #
-#  - other command line options                                        #
 #                                                                      #
 ########################################################################
 
