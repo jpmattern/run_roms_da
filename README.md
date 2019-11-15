@@ -58,7 +58,7 @@ Note that the `*.in` input files and the ROMS data files (`ocean_ini_*.nc`, `oce
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
  
 
