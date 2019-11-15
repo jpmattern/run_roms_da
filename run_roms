@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.2.3
+VERSION=1.2.4
 
 ########################################################################
 #
@@ -28,6 +28,7 @@ VERSION=1.2.3
 # 1.2.1  improved printed output (embracing unicode) 
 # 1.2.2  bugfix for nobio runs 
 # 1.2.3  improvements to code 
+# 1.2.4  added check 
 ########################################################################
 
 ########################################################################
@@ -160,6 +161,25 @@ fi
 #  read configuration file
 
 source "$configfile"
+if [[ "$?" -ne "0" ]]; then
+    echo "An error occured while reading the configuration file.
+Ensure that it is a valid bash script; common problems include: 
+(1) Invalid use of spaces in variable declarations, it must be
+    cycle_length=4
+and not
+    cycle_length = 4
+(2) Invalid use of spaces for variable values. If spaces are used, 
+in a variable value, they must be contained in '\"', for example
+    title=\"4DVar experiment\"
+and not 
+    title=4DVar experiment
+(3) Invalid characters/syntax error in paramchanges_ocean. If the ROMS
+variable name contain special characters, it is best to include the name 
+in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
+    paramchanges_ocean=( \"Hout(idUvel)\"=T )
+" >&2
+    raise_error "Failed reading the configuration file \"$configfile\"."
+fi
 
 ########################################################################
 #  perform checks 
