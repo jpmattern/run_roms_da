@@ -17,7 +17,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.2
+VERSION=0.9.3
 
 ########################################################################
 #
@@ -27,6 +27,7 @@ VERSION=0.9.2
 #           submit_da_script.bash
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
+# 0.9.3     added error message when failing to read configuration
 ########################################################################
 
 ########################################################################
@@ -199,6 +200,25 @@ fi
 ########################################################################
 
 source "$configfile"
+if [[ "$?" -ne "0" ]]; then
+    echo "An error occured while reading the configuration file.
+Ensure that it is a valid bash script; common problems include: 
+(1) Invalid use of spaces in variable declarations, it must be
+    cycle_length=4
+and not
+    cycle_length = 4
+(2) Invalid use of spaces for variable values. If spaces are used, 
+in a variable value, they must be contained in '\"', for example
+    title=\"4DVar experiment\"
+and not 
+    title=4DVar experiment
+(3) Invalid characters/syntax error in paramchanges_ocean. If the ROMS
+variable name contain special characters, it is best to include the name 
+in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
+    paramchanges_ocean=( \"Hout(idUvel)\"=T )
+" >&2
+    raise_error "Failed reading the configuration file \"$configfile\"."
+fi
 
 if $debug; then
     echo "debug: finished sourcing configuration file"
