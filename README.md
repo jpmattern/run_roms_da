@@ -1,2 +1,5 @@
 # `run_roms_da`
-bash script(s) to automate ROMS data assimilation
+
+Script(s) to automate ROMS data assimilation.
+ * written in bash 
+ * requires [NCO toolkit](http://nco.sourceforge.net/)
