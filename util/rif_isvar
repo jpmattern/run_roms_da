@@ -1,0 +1,20 @@
+#!/bin/bash
+
+if [[ $# != 2 ]]; then
+    echo "ERROR -- Two input arguments required." >&2
+    exit 1
+fi
+if [[ ! -e $1 ]]; then
+    echo "ERROR -- File \"$1\" does not exist." >&2
+    exit 1
+fi
+if [[ ! -f $1 ]]; then
+    echo "ERROR -- \"$1\" is not a regular file." >&2
+    exit 1
+fi
+
+res=$(grep -on "^\(\ *$2\ *=\{1,2\}\ *\)\([^!]*[^! ]\)" $1 | wc -l)
+if [[ $res -gt 0 ]]; then
+    exit 0
+fi
+exit 1

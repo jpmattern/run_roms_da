@@ -1,0 +1,1642 @@
+#!/bin/bash
+########################################################################
+#                                                                      #
+#  This script is used to run ROMS 4DVar data assimilation            #
+#                                                                      #
+########################################################################
+#                                                                      #
+#  Written by Paul Mattern                                             #
+#  - previously called submit_da_script.bash                           #
+#  - not constrained to incremental 4DVar                              #
+#  - made more modular: configuration file + this executable           #
+#  - added log file output for this script                             #
+#  - use of rif_setvar                                                 #
+#  - added timing of each cycle                                        #
+#  - restart option (--restart / -r)                                   #
+#  - other command line options                                        #
+#                                                                      #
+########################################################################
+
+VERSION=0.9.1
+
+########################################################################
+#
+# VERSION history/notes
+#
+# 0.9.0     first version, branched off version 1.9.1 of 
+#           submit_da_script.bash
+# 0.9.1     added -e/--extend option
+########################################################################
+
+########################################################################
+#  Function declarations
+########################################################################
+
+function help()
+{
+echo "usage: run_roms_da [-h] [-r] [-e] [-c CONFIGFILE] [-m MACHINES] [-d]
+
+Start ROMS 4DVar data assimilation cycles.
+
+optional arguments:
+  -h, --help            Show this help message and exit.
+  -r, --restart         Attempt to restart a previously failed run. 
+  -e, --extend          Attempt to restart a previously completed run and 
+                        extend it beyond its previous date range.
+                        (Like the -r/--restart option but does not assume 
+                        the last started cycle failed. Extending a run may 
+                        require to extend the \"stop_day\" variable in the
+                        configuration file).
+  -f, --force           Forces clean start, may overwrite previous results. 
+  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
+                        Use the configuration file CONFIGFILE instead of the 
+                        default \"run_roms_da.config\".
+  -m MACHINES, --machines MACHINES Allows specifying the machines to run 
+                        ROMS on (still requires valid machine file specified 
+                        in configuration).
+                        MACHINES must be a comma-separated list of machines,
+                        e.g. \"node1,node2\"
+  -v, --version         Print \"version $VERSION\" and exit.
+  -d, --debug           Switch on debug mode which will print more output
+                        to standard out.
+"
+}
+
+function raise_error()
+{
+#tput setaf 1
+echo "ERROR -- $1" >&2
+#tput sgr0
+exit 1
+}
+
+# default values for variables that might be set
+
+perform_test=false
+perform_restart=false
+perform_restart_extend=false
+force_freshstart=false
+debug=false
+configfile="run_roms_da.config"
+clean_nc=true
+write_log=true
+sleep_for=""
+machines_input=""
+report_time=true
+machines_numidle_input=""
+
+while [[ -n "$1" ]]; do
+    case $1 in
+        -h | --help | -\?)
+            help
+            exit 0
+            ;;
+        -v | --version)
+            echo "version $VERSION"
+            exit 0
+            ;;
+        -s | --sleep)
+            sleep_for=$2
+            shift 2
+            ;;
+        -i | --numidle | --idle)
+            machines_numidle_input=$2
+            shift 2
+            ;;
+        -c | --configfile)
+            configfile=$2
+            shift 2
+            ;;
+        --configfile=*)
+            configfile="${1#*=}"
+            shift
+            ;;
+        -m | --machines)
+            machines_input=$2
+            shift 2
+            ;;
+        -f | --force)
+            force_freshstart=true
+            shift
+            ;;
+        -r | --restart)
+            perform_restart=true
+            shift
+            ;;
+        -e | --extend)
+            perform_restart=true
+            perform_restart_extend=true
+            shift
+            ;;
+        -t | --test)
+            write_log=false
+            perform_restart=true
+            perform_test=true
+            shift
+            ;;
+        -d | --debug)
+            debug=true
+            shift
+            ;;
+        -n | --noclean)
+            clean_nc=false
+            shift
+            ;;
+        --) # End of all options
+            shift
+            break
+            ;;
+        *)
+            echo "$(tput setaf 1)ERROR -- Unknown option: \"$1\"$(tput sgr0)" >&2
+            help
+            exit 1
+            ;;
+    esac
+done
+
+tput setaf 4
+printf "┌%$((${COLUMNS:-$(tput cols)}-1))s\n"  '' | sed "s/ /─/g"
+printf "│  ROMS 4DVar assimilation script — run_roms_da version %s\n" "$VERSION"
+printf "├%$((${COLUMNS:-$(tput cols)}-1))s\n"  '' | sed "s/ /─/g"
+tput sgr0
+
+if $debug; then
+    echo "│
+├$(tput setaf 1) DEBUG MODE$(tput sgr0)"
+    echo "├ perform_restart=$perform_restart"
+    echo "├ debug=$debug"
+    echo "├ configfile=$configfile"
+    echo "├ clean_nc=$clean_nc"
+fi
+
+#  current script directory
+script_dir="$( cd "$( dirname "$0" )" && pwd )"
+
+#  current config file directory
+config_dir=$(dirname $(readlink -f $configfile))
+
+if $debug; then
+    echo "├ script_dir=$script_dir"
+    echo "├ config_dir=$config_dir"
+fi
+
+# add directory with utility scripts and check if all required commands are available
+export PATH="$script_dir:${PATH}"
+for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice ; do 
+    command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
+done
+
+if [[ $force_freshstart == true ]] && [[ $perform_restart == true ]]; then
+    raise_error "Cannot combine --force (-f) and --restart (-r) options."
+fi
+if [[ ! -f $configfile ]]; then
+    raise_error "Cannot find configuration file \"$configfile\"."
+fi
+
+########################################################################
+#  Read configuration file
+########################################################################
+
+source "$configfile"
+
+if $debug; then
+    echo "debug: finished sourcing configuration file"
+fi
+
+########################################################################
+#  Some preparation
+########################################################################
+
+echo " • preparing start"
+
+#
+# create variables if not defined in config for backward compatibility
+#
+
+if [[ -z "$ocean_in_local" ]]; then
+    ocean_in_local="$(basename "$ocean_in")"
+fi
+
+if [[ -z "$da_in_local" ]]; then
+    da_in_local="$(basename "$da_in")"
+fi
+
+if [[ -z "$bio_in_local" ]]; then
+    bio_in_local=$(basename "$bio_in")
+fi
+
+#
+# create variables if not defined in config
+#
+
+if [[ -z "$da_name" ]]; then
+    da_name="DA"
+fi
+
+if [[ -z "$run_roms_logfile" ]]; then
+    run_roms_logfile="${config_dir}/run_roms_da.log"
+fi
+
+if [[ -z "$roms_logfile_mask" ]]; then
+    roms_logfile_mask="roms_%d.log"
+fi
+
+if [[ -z "$storefiles_mask" ]]; then
+    storefiles_mask="${file_prefix}_fwd_*.nc"
+fi
+
+if [[ "$ocean_in_local" == *%d* ]]; then
+    ocean_in_local_mask="$ocean_in_local"
+fi
+
+if [[ "$da_in_local" == *%d* ]]; then
+    da_in_local_mask="$da_in_local"
+fi
+
+if [[ "$bio_in_local" == *%d* ]]; then
+    bio_in_local_mask="$bio_in_local"
+fi
+
+if [[ -z "$da_adjust" ]]; then
+    da_adjust=I
+fi
+
+if [[ $da_adjust == *I* ]]; then
+    if [[ -z "$stdi_file_local" ]]; then
+        stdi_file_local_mask="${file_prefix}_stdi_%d.nc"
+    elif [[ $stdi_file_local == *%s* ]] || [[ $stdi_file_local == *%d* ]]; then
+        stdi_file_local_mask="$stdi_file_local"
+    fi
+fi
+if [[ $da_adjust == *F* ]]; then
+    if [[ -z "$stdf_file_local" ]]; then
+        stdf_file_local_mask="${file_prefix}_stdf_%d.nc"
+    elif [[ $stdf_file_local == *%s* ]] || [[ $stdf_file_local == *%d* ]]; then
+        stdf_file_local_mask="$stdf_file_local"
+    fi
+fi
+if [[ $da_adjust == *B* ]]; then
+    if [[ -z "$stdb_file_local" ]]; then
+        stdb_file_local_mask="${file_prefix}_stdb_%d.nc"
+    elif [[ $stdb_file_local == *%s* ]] || [[ $stdb_file_local == *%d* ]]; then
+        stdb_file_local_mask="$stdb_file_local"
+    fi
+fi
+if [[ $da_adjust == *M* ]]; then
+    if [[ -z "$stdm_file_local" ]]; then
+        stdm_file_local_mask="${file_prefix}_stdm_%d.nc"
+    elif [[ $stdm_file_local == *%s* ]] || [[ $stdm_file_local == *%d* ]]; then
+        stdm_file_local_mask="$stdm_file_local"
+    fi
+fi
+
+if [[ -z "$obs_multifile" ]]; then
+    obs_multifile=false
+fi
+
+if [[ -z "$slice_obsfile" ]]; then
+    slice_obsfile=false
+fi
+if [[ -z "$use_nc_obsfile" ]]; then
+    use_nc_obsfile=false
+fi
+
+if [[ -z "$adaptive_paramchanges" ]]; then
+    adaptive_paramchanges=false
+fi
+
+if [[ -z "$adaptive_dt" ]]; then
+    adaptive_dt=false
+fi
+if [[ $adaptive_dt == true ]]; then
+    if $adaptive_paramchanges; then
+        raise_error "adaptive_dt and adaptive_paramchanges cannot be active together."
+    fi
+    if [[ -z "${adaptive_dt_adjustoutput_var}" ]]; then
+        adaptive_dt_adjustoutput_var=( NSTA NFLT NHIS NDEFHIS NAVG NDEFAVG NDIA NDEFDIA NTLM NDEFTLM NADJ NDEFADJ NSFF NOBC )
+    fi
+fi
+
+if [[ -z "$proceed_on_fatal_algorithm_result" ]]; then
+    proceed_on_fatal_algorithm_result=false
+fi
+
+if [[ -z "$copy_firstini" ]]; then
+    copy_firstini=false
+fi
+
+adjust_params=true
+if [[ -z "${adjust_params_names}" ]]; then
+    adjust_params=false
+elif [[ ${#adjust_params_names[@]} -eq 0 ]]; then
+    adjust_params=false
+fi
+
+if [[ -z "$roms_time_ref" ]]; then
+    echo "   \"roms_time_ref\" is not set in configuration file, attempting to read TIME_REF from \"$ocean_in\"."
+    roms_time_ref=$(rif_getvar "$ocean_in" "TIME_REF")
+    roms_time_ref=$(date --date="${roms_time_ref//\.0d0/}" --iso-8601)
+    echo "   setting roms_time_ref=${roms_time_ref}."
+fi
+# roms_time_ref in UNIX time (seconds since 1970-01-01)
+# TODO see if this works an rename
+roms_time_ref_unix=$(date --date="$roms_time_ref" +%s -u)
+
+# date conversion
+if [[ $start_day == *-* ]]; then
+    start_day_orig="$start_day"
+    start_day=$(sed "s/\.*0*$//" <<< $(bc -l <<< "$(($(date --date="$start_day" +%s -u) - $roms_time_ref_unix))/86400"))
+    echo "   converted start_day=\"$start_day_orig\" to $start_day (days since $roms_time_ref)"
+    unset start_day_orig 
+fi
+if [[ $stop_day == *-* ]]; then
+    stop_day_orig="$stop_day"
+    stop_day=$(sed "s/\.*0*$//" <<< $(bc -l <<< "$(($(date --date="$stop_day" +%s -u) - $roms_time_ref_unix))/86400"))
+    echo "   converted stop_day=\"$stop_day_orig\" to $stop_day (days since $roms_time_ref)"
+    unset stop_day_orig 
+fi
+
+if [[ -z "$cycle_transition_mode" ]]; then
+    cycle_transition_mode=0
+fi
+
+if [[ -z "$breakfilename" ]]; then
+    breakfilename=".stop_run_roms_da"
+fi
+if [[ -f "$main_dir/$breakfilename" ]]; then
+    echo "WARNING -- break file present, this will lead to termination after the next cycle if it is not removed."
+fi
+
+if [[ -z "$breakfile_remove" ]]; then
+    breakfile_remove=false
+fi
+
+if [[ -z "$storefiles_compress" ]]; then
+    storefiles_compress=false
+fi
+
+if [[ $storefiles_compress == true ]] && [[ -z "$storefiles_compress_nicelevel" ]]; then
+    storefiles_compress_nicelevel=10
+fi
+
+# This option is now on by default but can be turned off by setting title_addhost=false in config.
+if [[ -z "$title_addhost" ]] || [[ $title_addhost == true ]]; then
+    title="$title (host: $HOSTNAME)"
+fi
+
+# convert integer start modes to string
+if [[ $roms_startmode == [1-9] ]]; then
+    if [[ $roms_startmode == 1 ]]; then
+        roms_startmode=mpirun
+    elif [[ $roms_startmode == 2 ]]; then
+        roms_startmode=mpirun-idlemachines
+    elif [[ $roms_startmode == 3 ]]; then
+        roms_startmode=sbatch
+    elif [[ $roms_startmode == 4 ]]; then
+        roms_startmode=mpirun-plain
+    else
+        raise_error "Invalid ROMS startmode \"$roms_startmode\"."
+    fi
+fi
+# allow machines to be specified in config
+machines="$machines_input"
+# determine roms_startmode based on config and input
+if [[ $roms_startmode == auto ]]; then
+    command -v sbatch >/dev/null 2>&1 && roms_startmode=sbatch
+    if [[ $roms_startmode == auto ]]; then
+        if [[ -n "$machines" ]]; then
+            roms_startmode=mpirun-machines
+        else
+            roms_startmode=mpirun-idlemachines
+        fi
+    fi
+    echo "   switching from ROMS startmode \"auto\" to \"$roms_startmode\"."
+elif [[ -n "$machines_input" ]]; then
+    if [[ $roms_startmode != mpirun* ]]; then
+        echo "WARNING -- ROMS startmode \"$roms_startmode\" does not support specification of machines using --machines (-m)."
+    elif [[ $roms_startmode != mpirun-machines ]]; then
+        echo "   switching from ROMS startmode \"$roms_startmode\" to \"mpirun-machines\""
+        roms_startmode=mpirun-machines
+    fi
+elif [[ $roms_startmode == mpirun-machines ]] && [[ -z "$machines" ]]; then
+    # check if machines have been specified
+    raise_error "ROMS startmode \"$roms_startmode\" requires specification of machines (in config or using --machines (-m))."
+fi
+if [[ $roms_startmode == sbatch ]]; then
+    if [[ -z "sbatch_jobname" ]]; then
+        sbatch_jobname="run_roms_da_day%d"
+    fi
+fi
+if [[ $roms_startmode == s* ]] && [[ -n "$slurm_prolog_source" ]]; then
+    echo "   running \"source $slurm_prolog_source\""
+    source "$slurm_prolog_source"
+fi
+
+[[ -z "$machines_numidle" ]] && machines_numidle=0
+# overwrite if user-specified
+[[ -n "$machines_numidle_input" ]] && machines_numidle=$machines_numidle_input
+[[ $machines_numidle =~ ^[0-9]*$ ]] || raise_error "Invalid value for number of idle machines \"$machines_numidle\" (must be an integer)."
+if [[ $machines_numidle -gt 0 ]] && [[ $roms_startmode != s* ]]; then
+    raise_error "Number of idle machines specification is only supported for the \"sbatch\" ROMS startmode."
+fi
+
+
+#
+# perform some double-checks
+#
+
+if [[ ! -e "$executable" ]]; then
+    raise_error "ROMS executable \"$executable\" does not exist."
+fi
+if [[ ! -f "$ini_file" ]]; then
+    raise_error "Cannot find initial file \"$ini_file\"."
+fi
+
+
+if [[ $roms_startmode == sbatch ]]; then
+    if [[ -z "$sbatch_templatefile" ]]; then
+        raise_error "ROMS startmode \"$roms_startmode\" requires specification of template file (sbatch_templatefile in config)."
+    fi
+    if [[ -z "$use_sbatch_donefile" ]]; then
+        use_sbatch_donefile=false
+    fi
+fi
+
+if [[ $proceed_on_fatal_algorithm_result == true ]]; then
+    if [[ $ini_filetype != fwd ]]; then
+        raise_error "To use option \"proceed_on_fatal_algorithm_result\", ini_filetype must be set to \"fwd\"."
+    fi
+fi
+
+#
+# check if log files are present but perform_restart is not active
+#
+
+if [[ "$perform_restart" == false ]] && [[ "$force_freshstart" == false ]]; then
+    logfiles=( $storage_dir/${roms_logfile_mask//%d/*} )
+    if [[ -d $storage_dir ]] && [[ -f ${logfiles[0]} ]]; then
+        echo "Old log files found -- Are you sure you want to continue and possibly erase old files?"
+        select res in "Continue as is and possibly erase old files (equivalent to --force option)." "Attempt a restart from existing files (equivalent to --restart option)." "Abort."; do
+            case $REPLY in
+                1 ) break ;;
+                2 ) perform_restart=true; break ;;
+                3 ) exit 0 ;;
+            esac
+        done
+    fi
+fi
+
+# start logging
+
+if $write_log; then
+    if $perform_restart; then
+        echo "   continuing log \"$run_roms_logfile\""
+        echo "   attempting restart" >> "$run_roms_logfile"
+        echo "   script:             $0" >> "$run_roms_logfile"
+    else
+        echo "   starting log \"$run_roms_logfile\""
+        echo "   script:             $0" > "$run_roms_logfile"
+    fi
+    echo "   configuration file: ${config_dir}/$(basename $configfile)" >> "$run_roms_logfile"
+    echo "   started log at $(date +"%d-%b-%Y %T")" >> "$run_roms_logfile"
+    # redirect stdout and stderr
+    exec >  >(tee -a "$run_roms_logfile")
+    exec 2> >(tee -a "$run_roms_logfile" >&2)
+fi
+
+# ncks version check
+# newer version of ncks requires --trd to produce same output that older version produces by default 
+# (and older version does not recognize --trd )
+if [[ -z "$(ncks -m -v ocean_time "$ini_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")" ]]; then
+    ncksargs="--trd"
+else
+    ncksargs=""
+fi
+if $debug; then
+    echo "debug: setting ncksargs=\"$ncksargs\""
+fi
+if [[ $da_adjust == *I* ]]; then
+    if [[ ! -f "$stdi_file" ]]; then
+        raise_error "Standard deviation file \"$stdi_file\" does not exist."
+    fi
+    num_dim=$(ncks $ncksargs -m -v ocean_time "$stdi_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")
+    if [[ $num_dim == 1 ]]; then
+        slice_stdi_file=false
+    elif [[ $num_dim == 12 ]]; then
+        echo "   found $num_dim entries in \"$stdi_file\", using slicing"
+        slice_stdi_file=true
+    else
+        raise_error "Standard deviation file specified using \"$stdi_file\" has $num_dim time entries (needs 1 or 12)."
+    fi
+fi
+
+if [[ $da_adjust == *F* ]]; then
+    if [[ ! -f "$stf_file" ]]; then
+        raise_error "Standard deviation file \"$stdf_file\" does not exist."
+    fi
+    num_dim=$(ncks $ncksargs -m -v ocean_time "$stdf_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")
+    if [[ $num_dim == 1 ]]; then
+        slice_stdf_file=false
+    elif [[ $num_dim == 12 ]]; then
+        echo "   found $num_dim entries in \"$stdf_file\", using slicing"
+        slice_stdf_file=true
+    else
+        raise_error "Standard deviation file specified using \"$stdf_file\" has $num_dim time entries (needs 1 or 12)."
+    fi
+fi
+
+if [[ $da_adjust == *B* ]]; then
+    if [[ ! -f "$stdb_file" ]]; then
+        raise_error "Standard deviation file \"$stdb_file\" does not exist."
+    fi
+    num_dim=$(ncks $ncksargs -m -v ocean_time "$stdb_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")
+    if [[ $num_dim == 1 ]]; then
+        slice_stdb_file=false
+    elif [[ $num_dim == 12 ]]; then
+        echo "   found $num_dim entries in \"$stdb_file\", using slicing"
+        slice_stdb_file=true
+    else
+        raise_error "Standard deviation file specified using \"$stdb_file\" has $num_dim time entries (needs 1 or 12)."
+    fi
+fi
+
+if [[ $da_adjust == *M* ]]; then
+    if [[ ! -f "$stdm_file" ]]; then
+        raise_error "Standard deviation file \"$stdm_file\" does not exist."
+    fi
+    num_dim=$(ncks $ncksargs -m -v ocean_time "$stdm_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")
+    if [[ $num_dim == 1 ]]; then
+        slice_stdm_file=false
+    elif [[ $num_dim == 12 ]]; then
+        echo "   found $num_dim entries in \"$stdm_file\", using slicing"
+        slice_stdm_file=true
+    else
+        raise_error "Standard deviation file specified using \"$stdm_file\" has $num_dim time entries (needs 1 or 12)."
+    fi
+fi
+
+#
+# Create directories if necessary
+#
+
+if [[ ! -d "$main_dir" ]]; then
+    echo "   creating main directory \"$main_dir\""
+    mkdir -p "$main_dir"
+fi
+
+if [[ ! -d "$storage_dir" ]]; then
+    echo "   creating storage directory \"$storage_dir\""
+    mkdir -p "$storage_dir"
+fi
+
+if [[ -z "$bio_in" ]]; then
+    echo " • no bio in-file specified, assuming physics-only run"
+    adjust_params=false
+fi
+
+#
+# deal with cycle_transition_mode
+# cycle_length_roms is the assimilation cycle length used in ROMS whereas
+# cycle_length is the effective time difference between two cycle starts
+#
+
+if [[ $cycle_transition_mode == 0 ]]; then
+    cycle_length_roms=$cycle_length
+elif [[ $cycle_transition_mode == 1 ]]; then
+    cycle_length_roms=$cycle_length
+    cycle_length=$((cycle_transition_offset_sec/86400))
+    printf " • cycle transition mode $cycle_transition_mode\n        ROMS cycle length:%3dd\n   effective cycle length:%3dd\n" $cycle_length_roms $cycle_length
+fi
+if [[ $da_adjust == free ]]; then
+    echo " • variable da_adjust is set to \"free\", treating this
+    as a free (non-assimilative) simulation.
+    It is recommended to use run_roms for free simulations that do not use cycles."
+
+    if [[ -z "$da_in" ]]; then
+        if $debug; then
+            echo "debug: setting slice_obsfile=false, obs_multifile=false"
+        fi
+        slice_obsfile=false
+        obs_multifile=false
+    fi
+#else
+#    printf " • using \"%d-%d-%d-%d\" scheme\n" $cycle_length_roms $cycle_length $Nouter $Ninner
+fi
+if $debug; then
+    echo "debug: cycle_transition_mode: $cycle_transition_mode"
+    printf "debug: cycle_length=%d, cycle_length_roms=%d\n" $cycle_length $cycle_length_roms
+fi
+if [[ $cycle_length == 0 ]]; then
+    raise_error "Configuration of cycle_transition_mode led to cycle_length=0."
+fi
+
+#
+# figure out which file to use to generate initial conditions
+#
+
+if [[ -z "$ini_filetype" ]]; then
+    if rif_isvar "$ocean_in" DAINAME ; then
+        if [[ $cycle_length_roms == $cycle_length ]]; then
+            echo " • using DAI file to generate initial conditions"
+            ini_filetype=dai
+        else
+            echo " • using restart file to generate initial conditions (due to use of cycle transition mode $cycle_transition_mode)"
+            echo "   If this fails in an older version of ROMS (where NRST=NTIMES is enforced), try setting ini_filetype=fwd in configuration."
+            ini_filetype=rst
+            # from the ROMS source code
+            #!
+            #!  Insure that restart file is written only at the end.  In sequential
+            #!  data assimilation the restart file is used as the first guess for
+            #!  the next assimilation cycle.
+            #!
+            #        nRST(ng)=ntimes(ng)
+            # in newer versions:
+            #!
+            #!  Ensure that restart file is written only at least at the end.  In
+            #!  sequential data assimilation the restart file can be used as the
+            #!  first guess for the next assimilation cycle.  Notice that we can
+            #!  also use the DAINAME file for such purpose. However, in lagged
+            #!  data assimilation windows, "nRST" can be set to a value less than
+            #!  "ntimes" (say, daily) and "LcycleRST" is set to false. So, there
+            #!  are several initialization record possibilities for the next
+            #!  assimilation cycle.
+            #!
+            #        IF (nRST(ng).gt.ntimes(ng)) THEN
+            #          nRST(ng)=ntimes(ng)
+            #        END IF
+        fi
+    else
+        echo " • using restart file to generate initial conditions (due to old ROMS version, DAINAME not found)"
+        ini_filetype=rst
+    fi
+fi
+
+#
+# initialize other variables
+#
+
+cycle=1
+cycle_time_sum=0
+day=$start_day
+
+outvarnames=( gst rst his tlm tlf adj avg dia sta flt itl iad ads irp )
+# add dai if associated variable is present (dependent on ROMS version)
+rif_isvar "$ocean_in" DAINAME && outvarnames=( ${outvarnames[@]} dai )
+outvarnames_da=( hss err )
+
+# ceil(a/b) == floor((a+b-1)/b)
+#cycle_num=$((($stop_day-$start_day+$cycle_length-1)/$cycle_length + 1))
+cycle_num=$((($stop_day-$start_day)/$cycle_length+(($stop_day-$start_day)%$cycle_length > 0)+($stop_day==$start_day)))
+# Number of nodes to use.
+num_nodes=$(($NtileI*$NtileJ))
+month_array=( ZERO jan feb mar apr may jun jul aug sep oct nov dec )
+
+#
+# some output, report active options and perform double-checks
+#
+
+echo " • the following parts of the model will be adjusted:"
+[[ $da_adjust == *I* ]]  && echo "    • initial conditions"
+[[ $da_adjust == *B* ]]  && echo "    • boundary conditions"
+[[ $da_adjust == *F* ]]  && echo "    • forcings"
+[[ $da_adjust == *M* ]]  && echo "    • model error"
+[[ $da_adjust == free ]] && echo "    • none (free simulation)"
+
+option_summary=""
+
+if $adaptive_paramchanges; then
+    option_summary="${option_summary}\n    • adaptive_paramchanges (adjusting ROMS parameters in response to blow-ups or fatal algorithm results)"
+fi
+
+if $adaptive_dt; then
+    option_summary="${option_summary}\n    • adaptive_dt (adjusting of dt in response to blow-ups)"
+fi
+
+if $slice_obsfile; then
+    option_summary="${option_summary}\n    • slice_obsfile (time-slicing of observation file)"
+fi
+
+if $proceed_on_fatal_algorithm_result; then
+    option_summary="${option_summary}\n    • proceed_on_fatal_algorithm_result (continue with next cycle if fatal algorithm result occurs)"
+fi
+
+if [[ $storefiles_compress == true ]]; then
+    option_summary="${option_summary}\n    • storefiles_compress (post-simulation compression, level ${storefiles_compress_deflatelevel}"
+    if [[ $storefiles_compress_shuffle == true ]]; then
+        option_summary="${option_summary}, shuffling)"
+    else
+        option_summary="${option_summary})"
+    fi
+fi
+
+if [[ -z "$option_summary" ]]; then
+    echo -e " • the following options are active:\n    -none-"
+else
+    echo -e " • the following options are active:$option_summary"
+    option_summary=""
+fi
+
+if [[ -n "$sleep_for" ]]; then
+    echo "sleeping for $sleep_for minutes before starting"
+    sleep "${sleep_for}m"
+fi
+
+########################################################################
+#  Start sequential data assimilation
+########################################################################
+
+cd $main_dir
+
+if $perform_restart; then
+    logfiles=(${roms_logfile_mask//%d/*})
+    if [[ ${#logfiles[@]} > 1 ]]; then
+        echo "WARNING -- Found more than one log file, using last." >&2
+    elif [[ ${#logfiles[@]} == 0 ]]; then
+        echo "WARNING -- Found 0 log files, searching in storage." >&2
+        logfiles=($storage_dir/${roms_logfile_mask//%d/*})
+        if [[ ${#logfiles[@]} == 0 ]]; then
+            raise_error "Found no log files in base directory or storage."
+        fi
+    fi
+    # look for "restart at X:Y" first where X=cycle Y=day (must be the last entry behind "starting data assimilation cycle")
+    # use day to temporarily hold whole string
+    day=$(egrep '(starting data assimilation cycle|restart at)' "$run_roms_logfile" | tail -n 1 | grep 'restart at')
+    if [[ -n "$day" ]]; then
+        day="$(sed -n "s/.*restart  *at  *\([0-9]\{1,\}\):\([0-9]\{1,\}\).*/\1:\2/p" <<< "$day")"
+        echo "restart: using restart information in DA log file: \"$day\""
+        cycle=${day%:*}
+        day=${day#*:}
+    else
+        day=$(echo ${logfiles[$((${#logfiles[@]}-1))]} | sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p")
+        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running $da_name algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
+        if [[ -z "$day" ]]; then
+            echo "WARNING -- Cannot find day in ROMS log file, using day from DA log." >&2
+            day="$day_log"
+            if [[ -z "$day" ]]; then
+                raise_error "Cannot find day in DA log file."
+            fi
+        elif [[ "$day" -ne "$day_log" ]]; then
+            raise_error "Day in ROMS log file ($day) does not agree with day in DA log ($day_log). Are multiple ROMS log-files present?"
+        fi
+        cycle=$(tail -n 1000 "$run_roms_logfile" | tac | sed -n "1,/^ • starting data assimilation/ s/^ • starting data assimilation cycle: *\([0-9]\{1,\}\).*/\1/p")
+        if [[ -z "$cycle" ]]; then
+            raise_error "Cannot find cycle in log file."
+        fi
+        unset day_log
+    fi
+    if $perform_restart_extend; then
+        echo "restart: identified cycle $cycle (day $day) as the last finished cycle, extending run"
+        ((day+=cycle_length))
+        ((cycle++))
+        echo "restart: extending run starting at current cycle $cycle (day $day)"
+    else
+        echo "restart: identified cycle $cycle as the current cycle, day $day as the current day, attempting restart"
+    fi
+
+    if $perform_test; then
+        echo "TEST MODE == QUITTING"
+        exit 0
+    fi
+fi
+
+
+# number of cycles already passed; needed in case of restarts for timekeeping
+cycle_ini=$(($cycle-1))
+day_ini=$day
+cycle_length_orig=$cycle_length_roms
+if $adaptive_dt; then
+    dt_orig=$dt
+    adaptive_dt_index=-1
+fi
+if [[ $adaptive_paramchanges == true ]]; then
+    adaptive_paramchanges_active=false
+    for classnamevalue in "${paramchanges_adaptive[@]}"; do
+        class="${classnamevalue%:*}"
+        if [[ $class != ocean ]] && [[ $class != bio ]] && [[ $class != da ]]; then
+            raise_error "Invalid file type identifier: \"$class\" (must be one of \"ocean\", \"bio\", or \"da\")"
+        fi
+    done
+fi
+# bio_in_old is not guaranteed to exist
+if [[ -n "$bio_in_local_mask" ]]; then
+    bio_in_old="$storage_dir/$(printf "$bio_in_local_mask" $((day-cycle_length)))"
+else
+    bio_in_old="$storage_dir/$bio_in_local"
+fi
+
+while [[ $day -lt $stop_day ]]; do
+    cycle_start=$(date +"%s")
+    day_unix=$(($roms_time_ref_unix + $day*86400))
+    cycle_date=$(date --date=@$day_unix -u --iso-8601)
+    if $debug; then
+        echo "debug: cycle_date=\"$cycle_date\" ($(date --date=@$day_unix -u --iso-8601=seconds))"
+    fi
+    
+    echo ""
+    # if this line is changed, remember to adjust restart sed statement above
+    echo " • starting data assimilation cycle: $cycle ($cycle_date, day $day)"
+
+    # %-m returns month without any leading zeros
+    cur_month=$(date --date=@$day_unix +"%-m")
+    if $debug; then
+        echo "debug: current month=$cur_month"
+    fi
+
+    #---------------------------------------------------------------------
+    # Run 4DVar Algorithm.
+    #---------------------------------------------------------------------
+
+    # update/set file names
+    ini_file_local=${file_prefix}_ini_${day}.nc
+    mod_file_local=${file_prefix}_mod_${day}.nc
+    log_file=$(printf "$roms_logfile_mask" $day)
+
+    FWDname=${file_prefix}_fwd_${day}.nc
+    if [[ $da_adjust == free ]]; then
+        FWDname=${file_prefix}_his_${day}.nc
+    fi
+
+    if [[ "$log_file" =~ .*\ .* ]]; then
+        raise_error "Log file name contains whitespaces (\"$log_file\")."
+    fi
+
+    if [[ -n "$ocean_in_local_mask" ]]; then
+        # clean old copy so that files do not accumulate
+        if [[ $cycle -gt 1 ]] && [[ -f "$ocean_in_local" ]]; then
+            /bin/rm "$ocean_in_local"
+        fi
+        ocean_in_local=$(printf "$ocean_in_local_mask" $day)
+    fi
+
+    if [[ -n "$bio_in_local_mask" ]]; then
+        # clean old copy so that files do not accumulate
+        if [[ $cycle -gt 1 ]] && [[ -f "$bio_in_local" ]]; then
+            /bin/rm "$bio_in_local"
+        fi
+        bio_in_local=$(printf "$bio_in_local_mask" $day)
+    fi
+
+    if [[ -n "$da_in_local_mask" ]]; then
+        # clean old copy so that files do not accumulate
+        if [[ $cycle -gt 1 ]] && [[ -f "$da_in_local" ]]; then
+            /bin/rm "$da_in_local"
+        fi
+        da_in_local=$(printf "$da_in_local_mask" $day)
+    fi
+
+    # Clean directory by removing all existing netCDF files.
+
+    if $clean_nc; then
+        if $debug; then
+            echo "debug: files being removed:"
+            ls $main_dir/"${file_prefix}"*"$day"*.nc
+        fi
+        /bin/rm $main_dir/"${file_prefix}"*"$day"*.nc 2> /dev/null
+    fi
+
+    # -F option shows the same variable indexed with Fortran conventions (1-based)
+    # -d Option -d controls the hyperslab specification
+    # --overwrite option will force overwriting (deletion) of old files
+    if [[ $da_adjust -ne free ]]; then
+        /bin/rm -f ${stdi_file_local} ${stdf_file_local} ${stdb_file_local} ${stdm_file_local}
+    fi
+    if [[ $da_adjust == *I* ]]; then
+        if [[ $stdi_file_local_mask == *%s* ]]; then
+            stdi_file_local=$(printf "$stdi_file_local_mask" ${month_array[$cur_month]})
+        elif [[ $stdi_file_local_mask == *%d* ]]; then
+            stdi_file_local=$(printf "$stdi_file_local_mask" ${day})
+        fi
+        if [[ $slice_stdi_file == true ]]; then
+            if $debug ; then
+                echo "debug: executing: ncks -F --overwrite -d ocean_time,${cur_month} \"$stdi_file\" \"$stdi_file_local\""
+            fi
+            ncks -F --overwrite -d ocean_time,${cur_month} "$stdi_file" "$stdi_file_local"
+        else
+            cp "$stdi_file" "$stdi_file_local"
+        fi
+        if [[ "$?" -ne "0" ]]; then
+            raise_error "Creation of standard deviation file failed."
+        fi
+    fi
+    if [[ $da_adjust == *F* ]]; then
+        if [[ $stdf_file_local_mask == *%s* ]]; then
+            stdf_file_local=$(printf "$stdf_file_local_mask" ${month_array[$cur_month]})
+        elif [[ $stdf_file_local_mask == *%d* ]]; then
+            stdf_file_local=$(printf "$stdf_file_local_mask" ${day})
+        fi
+        if [[ $slice_stdf_file == true ]]; then
+            ncks -F --overwrite -d ocean_time,${cur_month} "$stdf_file" "$stdf_file_local"
+        else
+            cp "$stdf_file" "$stdf_file_local"
+        fi
+        if [[ "$?" -ne "0" ]]; then
+            raise_error "Creation of standard deviation file failed."
+        fi
+    fi
+    if [[ $da_adjust == *B* ]]; then
+        if [[ $stdb_file_local_mask == *%s* ]]; then
+            stdb_file_local=$(printf "$stdb_file_local_mask" ${month_array[$cur_month]})
+        elif [[ $stdb_file_local_mask == *%d* ]]; then
+            stdb_file_local=$(printf "$stdb_file_local_mask" ${day})
+        fi
+        if [[ $slice_stdb_file == true ]]; then
+            ncks -F --overwrite -d ocean_time,${cur_month} "$stdb_file" "$stdb_file_local"
+        else
+            cp "$stdb_file" "$stdb_file_local"
+        fi
+        if [[ "$?" -ne "0" ]]; then
+            raise_error "Creation of standard deviation file failed."
+        fi
+    fi
+    if [[ $da_adjust == *M* ]]; then
+        if [[ $stdm_file_local_mask == *%s* ]]; then
+            stdm_file_local=$(printf "$stdm_file_local_mask" ${month_array[$cur_month]})
+        elif [[ $stdm_file_local_mask == *%d* ]]; then
+            stdm_file_local=$(printf "$stdm_file_local_mask" ${day})
+        fi
+        if [[ $slice_stdm_file == true ]]; then
+            ncks -F --overwrite -d ocean_time,${cur_month} "$stdm_file" "$stdm_file_local"
+        else
+            cp "$stdm_file" "$stdm_file_local"
+        fi
+        if [[ "$?" -ne "0" ]]; then
+            raise_error "Creation of standard deviation file failed."
+        fi
+    fi
+
+    # initial conditions file
+
+    if [[ $day -eq $start_day ]]; then
+        if [[ ! -f "$ini_file" ]]; then
+            raise_error "Cannot find initial file \"$ini_file\"."
+        fi
+        if $copy_firstini; then
+            echo "copying first initial conditions to storage"
+            cp -p -v "$ini_file" ${storage_dir}/$ini_file_local
+        fi
+        cp -p "$ini_file" $ini_file_local
+    else
+        if [[ ! -f ${storage_dir}/$ini_file_local ]]; then
+            raise_error "Cannot find initial file \"${storage_dir}/$ini_file_local\"."
+        fi
+        cp -p ${storage_dir}/$ini_file_local .
+    fi
+
+    # observation file
+
+    if $obs_multifile; then
+        counter=0
+        while [[ $day -ge ${obs_filedates[$counter]} ]]; do
+            counter=$((counter + 1))
+        done
+        counter=$((counter - 1))
+        if [[ $counter == -1 ]]; then
+            raise_error "Current date ($day) is lower than entry in obs_filedates."
+        fi
+        obs_file=${obs_files[$counter]}
+        if [[ -z "$obs_file" ]]; then
+            if $debug; then
+                echo "obs_files=${obs_files[@]}"
+                echo "counter=$counter"
+                echo "obs_files[counter]=${obs_files[$counter]}"
+            fi
+            raise_error "Invalid entry in obs_files (array out of bounds?)."
+        fi
+        echo "current observation file: $obs_file"
+    fi
+    if [[ ! -f "$obs_file" ]] && [[ -n "$da_in" ]]; then
+        # empty da_in indicates free simulation without obs file
+        raise_error "Cannot find observation file \"$obs_file\"."
+    fi
+
+    if $slice_obsfile; then
+        obs_file_slice="${file_prefix}_obs_${day}.nc"
+        slice_args="--overwrite"
+        if $slice_includelasttimestep; then
+            slice_args="--overwrite --includemaxdatenum"
+        fi
+        echo "   slice_obsfile: slicing obsfile (from $day to $((day+cycle_length_roms))) to create \"$obs_file_slice\"."
+        if $use_nc_obsfile; then
+            if $debug; then
+                echo "debug: executing: nc_obsfile slice \"$obs_file\" --datenum \"$day:$((day+cycle_length_roms))\" --out \"$obs_file_slice\" ${slice_args}"
+            fi
+            nc_obsfile slice "$obs_file" --datenum "$day:$((day+cycle_length_roms))" --out "$obs_file_slice" ${slice_args}
+        else
+            if $debug; then
+                echo "debug: executing: nc_obsslice $slice_args \"$obs_file\" $day $((day+cycle_length_roms)) \"$obs_file_slice\""
+            fi
+            nc_obsslice $slice_args "$obs_file" $day $((day+cycle_length_roms)) "$obs_file_slice"
+        fi
+        [[ $? -ne 0 ]] && raise_error "Slicing of obsfile failed."
+        obs_file_local="$obs_file_slice"
+    elif [[ -n "$da_in" ]]; then
+        # empty da_in indicates free simulation without obs file
+        obs_file_local="$(basename $obs_file)"
+        cp -p "$obs_file" "$obs_file_local"
+    fi
+
+    #
+    # Modify ocean input file.
+    #
+
+    if [[ -f $ocean_in_local ]]; then
+        /bin/rm $ocean_in_local
+    fi
+    cp $ocean_in $ocean_in_local
+
+    # making custom parameter changes (these may be overwritten by later changes)
+    if [[ ${#paramchanges_ocean[@]} -gt 0 ]]; then
+        if [[ $cycle == 1 ]]; then
+            echo " • parameter changes to \"$(basename $ocean_in_local)\" (only shown in first cycle):"
+        elif $debug; then
+            echo "debug: Parameter changes to \"$(basename $ocean_in_local)\":"
+        fi
+        for namevaluepair in "${paramchanges_ocean[@]}"; do
+            name="${namevaluepair%%=*}"
+            value="${namevaluepair##*=}"
+            if [[ $cycle == 1 ]] || $debug; then
+                printf "   %s = %s\n" "$name" "$value"
+            fi
+            rif_setvar "$ocean_in_local" "$name" "$value" || echo " ! Error setting variable"
+        done
+    elif [[ $cycle == 1 ]] || $debug; then
+        echo " • no parameter changes to \"$(basename $ocean_in_local)\""
+    fi
+
+    # changes to the output variable names
+    for outname in ${outvarnames[*]}; do
+        outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
+        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+    done
+
+    NTIMES=$((cycle_length_roms*86400/dt))
+    if $debug; then
+        echo "debug: setting NTIMES=$NTIMES"
+    fi
+    
+
+    if [[ "$ini_filetype" == rst ]]; then
+        if [[ $cycle_length_roms == $cycle_length ]]; then
+            rif_setvar $ocean_in_local NRST $NTIMES
+        else
+            NRST=$((cycle_length*86400/dt))
+            if $debug; then
+                echo "debug: setting NRST=$NRST"
+            fi
+            rif_setvar $ocean_in_local NRST $NRST
+            # turn off cycling
+            rif_setvar $ocean_in_local LcycleRST F
+        fi
+    fi
+
+    rif_setvar $ocean_in_local TITLE "$title"
+    rif_setvar $ocean_in_local NtileI $NtileI
+    rif_setvar $ocean_in_local NtileJ $NtileJ
+    rif_setvar $ocean_in_local Nouter $Nouter
+    rif_setvar $ocean_in_local Ninner $Ninner
+    rif_setvar $ocean_in_local DSTART $day
+    rif_setvar $ocean_in_local NTIMES $NTIMES
+    rif_setvar $ocean_in_local DT $dt
+
+    rif_setvar $ocean_in_local ININAME $ini_file_local
+    rif_setvar $ocean_in_local FWDNAME $FWDname
+
+    # setting gst, rst, his, tlm, tlf, adj, avg, dia, sta, flt, and dai file names
+    for outname in ${outvarnames[*]}; do
+        outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
+        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+    done
+    # empty da_in indicates free simulation
+    if [[ -n "$da_in" ]]; then
+        rif_setvar $ocean_in_local APARNAM $da_in_local
+    fi
+
+    #if using adaptive_dt adjust frequency of output if desired
+    if [[ $adaptive_dt == true ]]; then
+        # check if option is turned on and if adjustment is required
+        if [[ $adaptive_dt_adjustoutput == true && $adaptive_dt_index -gt -1 ]]; then
+            echo " • parameter changes to \"$ocean_in_local\" (adaptive_dt with \"adaptive_dt_adjustoutput\" option):"
+            for outname in ${adaptive_dt_adjustoutput_var[@]}; do
+                # get values from
+                oldval=$(rif_getvar "$ocean_in_local" "$outname")
+                # parameters like NSTA are often set to 0 or 1 if not in use, ignore them
+                if [[ $oldval -gt 1 ]]; then
+                    newval=$(((oldval*dt_orig)/dt))
+                    printf "   %s = %s\n" "$outname" "$newval"
+                    rif_setvar "$ocean_in_local" "$outname" "$newval"
+                fi
+            done
+        fi
+    fi
+
+    #
+    # Modify 4DVar input file and specify above files.
+    #
+
+    # empty da_in indicates free simulation
+    if [[ -n "$da_in" ]]; then
+        if [[ -f "$da_in_local" ]]; then
+            /bin/rm $da_in_local
+        fi
+        if [[ ! -f "$da_in" ]]; then
+            raise_error "Cannot find ROMS input file \"$da_in\"."
+        fi
+        cp "$da_in" "$da_in_local"
+
+        # making custom parameter changes to parameters
+        if [[ ${#paramchanges_da[@]} -gt 0 ]]; then
+            if [[ $cycle == 1 ]]; then
+                echo " • parameter changes to \"$(basename $da_in_local)\" (only shown in first cycle):"
+            elif $debug; then
+                echo "debug: Parameter changes to \"$(basename $da_in_local)\":"
+            fi
+            for namevaluepair in "${paramchanges_da[@]}"; do
+                name="${namevaluepair%%=*}"
+                value="${namevaluepair##*=}"
+                if [[ $cycle == 1 ]] || $debug; then
+                    printf "   %s = %s\n" "$name" "$value"
+                fi
+                rif_setvar "$da_in_local" "$name" "$value" || echo " ! Error setting variable"
+            done
+        #elif [[ $cycle == 1 ]] || $debug; then
+        #    echo " • no parameter changes to \"$(basename $da_in_local)\""
+        fi
+        [[ $da_adjust == *I* ]] && rif_setvar $da_in_local STDnameI $stdi_file_local
+        [[ $da_adjust == *F* ]] && rif_setvar $da_in_local STDnameF $stdf_file_local
+        [[ $da_adjust == *B* ]] && rif_setvar $da_in_local STDnameB $stdb_file_local
+        [[ $da_adjust == *M* ]] && rif_setvar $da_in_local STDnameM $stdm_file_local
+        rif_setvar $da_in_local OBSname "$obs_file_local"
+        rif_setvar $da_in_local MODname "$mod_file_local"
+        # changes to other output variable names
+        for outname in ${outvarnames_da[*]}; do
+            outname_full="$(tr '[:lower:]' '[:upper:]' <<< "$outname")name"
+            rif_setvar $da_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+        done
+    fi
+
+    #
+    # Modify biological input file.
+    #
+
+    if [[ -n "$bio_in_local" ]] && [[ -f "$bio_in_local" ]]; then
+        /bin/rm $bio_in_local
+    fi
+    if [[ -n "$bio_in" ]]; then
+        if [[ ! -f "$bio_in" ]]; then
+            raise_error "Cannot find ROMS input file \"$bio_in\"."
+        fi
+        rif_setvar $ocean_in_local BPARNAM "$bio_in_local"
+        cp "$bio_in" "$bio_in_local"
+    fi
+    # making custom parameter changes to biological parameters
+    if [[ ${#paramchanges_bio[@]} -gt 0 ]]; then
+        if [[ $cycle == 1 ]]; then
+            echo " • parameter changes to \"$(basename $bio_in_local)\" (only shown in first cycle):"
+        elif $debug; then
+            echo "debug: Parameter changes to \"$(basename $bio_in_local)\":"
+        fi
+        for namevaluepair in "${paramchanges_bio[@]}"; do
+            name="${namevaluepair%%=*}"
+            value="${namevaluepair##*=}"
+            if [[ $cycle == 1 ]] || $debug; then
+                printf "   %s = %s\n" "$name" "$value"
+            fi
+            rif_setvar "$bio_in_local" "$name" "$value" || echo " ! Error setting variable"
+        done
+    elif [[ $cycle == 1 ]] || $debug; then
+        echo " • no parameter changes to \"$(basename $bio_in_local)\""
+    fi
+
+    # making changes based for adjust_params (may overwrite previous)
+
+    if $adjust_params; then
+        adjust_params_mode=0
+        if [[ $cycle == 1 ]]; then
+            echo " • no adjust_params parameter adjustments in first cycle"
+        elif [[ $adjust_params_mode == 0 ]]; then
+            # obtain parameter values from ini-file
+            # allows extraction of multiple parameters for different regions if those are written to ini-file
+            echo " • parameter adjustments (adjust_params):"
+            for ((i=0;i<${#adjust_params_names[@]};++i)); do
+                if [[ -f "$bio_in_old" ]]; then
+                    oldval=$(rif_getvar "$bio_in_old" "${adjust_params_names[i]}")
+                else
+                    oldval=$(rif_getvar "$bio_in_local" "${adjust_params_names[i]}")
+                fi
+                newval=$(ncks -H -s "%.16fd0 " -v "${adjust_params_names[i]}" "$ini_file_local")
+                if [[ -n "$adjust_params_correction" ]];then
+                    newval=$($adjust_params_correction "${adjust_params_names[i]}" "$newval" $adjust_params_correction_args)
+                    if [[ "$?" -ne "0" ]]; then
+                        raise_error "Call to "$adjust_params_correction" failed."
+                    fi
+                fi
+                printf "   %13s \"%s\" -> \"%s\"\n" "${adjust_params_names[i]}" "$oldval" "$newval"
+                rif_setvar "$bio_in_local" "${adjust_params_names[i]}" "$newval"
+            done
+        else
+            # obtain parameter values from log-file
+            # allows extraction of multiple parameters for different regions
+            echo " • parameter adjustments (adjust_params):"
+            for ((i=0;i<${#adjust_params_names[@]};++i)); do
+                if [[ -f "$bio_in_old" ]]; then
+                    oldval=$(rif_getvar "$bio_in_old" "${adjust_params_names[i]}")
+                else
+                    oldval=$(rif_getvar "$bio_in_local" "${adjust_params_names[i]}")
+                fi
+                newval=$(grep -e "\b${adjust_params_names[i]}\b" "$log_file_old" | tail -1 | sed -n -e "s/.*=\(.*\)/\1/g" -e "s/E/d/gp")
+                printf "   %13s \"%s\" -> \"%s\"\n" "${adjust_params_names[i]}" "$oldval" "$newval"
+                rif_setvar "$bio_in_local" "${adjust_params_names[i]}" "$newval"
+            done
+        fi
+    fi
+    
+    # make custom parameter changes 
+
+    if [[ $adaptive_paramchanges == true ]] && [[ $adaptive_paramchanges_active == true ]]; then
+        echo " • parameter adjustments (adaptive_paramchanges):"
+        for classnamevalue in "${paramchanges_adaptive[@]}"; do
+            class="${classnamevalue%:*}"
+            namevaluepair="${classnamevalue##*:}"
+            name="${namevaluepair%%=*}"
+            value="${namevaluepair##*=}"
+            if $debug ; then
+                echo "debug: parsed \"$classnamevalue\" to \"$class\",\"$name\",\"$value\""
+            fi
+            if [[ $class == ocean ]]; then
+                file="$ocean_in_local"
+            elif [[ $class == bio ]]; then 
+                file="$bio_in_local"
+            elif [[ $class == da ]]; then
+                file="$da_in_local"
+            else
+                raise_error "Invalid file type identifier: \"$class\" (must be one of \"ocean\", \"bio\", or \"da\")"
+            fi
+            printf "   %25s: %13s = \"%s\"\n" "$file" "$name" "$value"
+            rif_setvar "$file" "$name" "$value"
+        done
+    fi
+
+    # Run incremental 4DVar algorithm.
+
+    echo " • running $da_name algorithm, starting day: $day ($cycle_date)"
+
+    if [[ -f "$log_file" ]]; then
+        /bin/rm -f "$log_file"
+    fi
+
+    if [[ $roms_startmode == mpirun-machines ]]; then
+        if $debug; then
+            echo "debug: executing:
+mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $ocean_in_local > $log_file"
+        fi
+        echo "   using the following machines: \"$machines\""
+        mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $ocean_in_local > $log_file
+    elif [[ $roms_startmode == mpirun ]]; then
+        mpirun -np $num_nodes -machinefile $machinefile $executable $ocean_in_local > $log_file
+    elif [[ $roms_startmode == mpirun-idlemachines ]]; then
+        machines="$(idlemachines $machinefile -n $num_nodes)"
+        if [[ -z "$machines" ]]; then
+            raise_error "No idle machines found."
+        fi
+        echo "   using the following idle machines: \"$machines\""
+        mpirun -np $num_nodes -hostfile $machinefile -host "$machines" $executable $ocean_in_local > $log_file
+    elif [[ $roms_startmode == srun ]]; then
+        srun --ntasks $num_nodes $executable $ocean_in_local > $log_file
+    elif [[ $roms_startmode == sbatch ]]; then
+        # use sbatch to start job
+        if [[ ! -f "$sbatch_templatefile" ]]; then
+            raise_error "Cannot find sbatch template file \"$sbatch_templatefile\"."
+        fi
+        sbatch_file=".run_roms_da_sbatch.bash"
+        cp "$sbatch_templatefile" "$sbatch_file"
+        sbatch_name="$sbatch_jobname"
+        [[ "$sbatch_name" == *%d* ]] && sbatch_name="${sbatch_name//%d/$day}"
+        [[ "$sbatch_name" == *%c* ]] && sbatch_name="${sbatch_name//%c/$cycle}"
+        # if ntasks-per-node is set, use num_nodes (ntasks) to set nodes
+        # try to obtain ntasks-per-node from sbatch_args or else sbatch_file
+        if [[ $sbatch_args == *--ntasks-per-node=* ]]; then
+            ntasks_per_node=$(sed -r -n "s/.*--ntasks-per-node=([0-9]+).*/\1/p" <<< "$sbatch_args")
+        else
+            ntasks_per_node=$(sed -r -n "s/^#SBATCH  *--ntasks-per-node= *([0-9]+).*/\1/p" < "$sbatch_file")
+        fi
+        if [[ -n "$ntasks_per_node" ]] ; then
+            nodes=1
+            while [[ $((num_nodes > nodes*ntasks_per_node)) == 1 ]]; do
+                ((nodes++))
+            done
+            if [[ $nodes -ne $nodes_old ]]; then
+                echo "   setting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${num_nodes})" 
+            fi
+            sbatch_args="$sbatch_args --nodes=$nodes"
+        fi
+        if [[ $machines_numidle -gt 0 ]]; then
+            numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
+            if [[ $numidle -lt $machines_numidle ]]; then
+                echo "   hibernating until ${machines_numidle} machines are idle"
+                while [[ $numidle -lt $machines_numidle ]]; do 
+                    sleep 30s
+                    numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
+                done
+            fi
+            echo "   found ${machines_numidle} idle machines -- proceeding"
+        fi
+        echo "   submitting job with name \"$sbatch_name\""
+        if $use_sbatch_donefile ; then
+            donefile="$main_dir/.run_roms_da.completed${day}.tmp"
+            if [[ -f "$donefile" ]]; then
+                /bin/rm "$donefile"
+            fi
+            echo "   then sleeping until \"$(basename "$donefile")\" is created by the submitted job"
+        fi
+        # run sbatch
+        sbatch_output="$(sbatch --job-name="$sbatch_name" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local,DONEFILE=$donefile" --ntasks=$num_nodes $sbatch_args --output="$log_file" "$sbatch_file")"
+        echo "   $sbatch_output" | sed "s/Submitted/submitted/"
+
+        # monitor job
+        if $use_sbatch_donefile ; then
+            sleep 5s
+            while [[ ! -f "$donefile" ]]; do
+                sleep 10s
+            done
+            echo "   found \"$(basename "$donefile")\", assuming ROMS terminated"
+            /bin/rm "$donefile"
+        else
+            # expecting output to be something like "Submitted batch job 48342"
+            sbatch_jobid="$(sed -r -n "s/.*job ([0-9]+).*/\1/p" <<< "$sbatch_output")"
+            if $debug; then
+                echo "debug: sbatch_output=\"$sbatch_output\", sbatch_jobid=$sbatch_jobid"
+            fi
+            while [[ -n "$(squeue -j $sbatch_jobid --noheader 2> /dev/null)" ]]; do
+                sleep 10s
+            done
+            echo "   batch job $sbatch_jobid terminated"
+        fi
+        /bin/rm -f "$sbatch_file"
+    elif [[ $roms_startmode == mpirun-plain ]]; then
+        mpirun -np $num_nodes $executable $ocean_in_local > $log_file
+    else
+        raise_error "Invalid ROMS startmode \"$roms_startmode\"."
+    fi
+
+    if [[ ! -f "$log_file" ]]; then
+        raise_error "Incomplete cycle, cannot find log file \"$log_file\" (cycle $cycle)."
+    fi
+    if [[ -n "$da_in" ]] && [[ ! -f "$mod_file_local" ]]; then
+        raise_error "Incomplete cycle, cannot find mod file \"$mod_file_local\" (cycle $cycle)."
+    fi
+
+    error_desc=""
+    if [[ "$?" -ne "0" ]]; then
+        error_desc="early error"
+    elif [[ -n "$(grep -m 1 'BLOWUP\|Blowing' $log_file)" ]]; then
+        error_desc="blowup"
+    elif [[ -n "$(grep -m 1 'CG_DELTA not positive' $log_file)" ]]; then
+        error_desc="fatal algorithm result (CG_DELTA)"
+    elif [[ -n "$(grep -m 1 'Negative Ritz value found' $log_file)" ]]; then
+        error_desc="fatal algorithm result (negative Ritz)"
+    elif [[ -n "$(grep -m 1 'Fatal algorithm result' $log_file)" ]]; then
+        error_desc="fatal algorithm result"
+    elif [[ -n "$(grep -m 1 'ERROR' $log_file)" ]]; then
+        error_desc="error"
+    fi
+
+    check_lastfwd=true
+    if [[ -n "$error_desc" ]]; then
+        repeat_cycle=false
+        error_prefix="ERROR"
+        error_suffix="."
+        if $adaptive_dt; then
+            if [[ $error_desc == *error* || $error_desc == *algorithm* ]]; then
+                error_prefix="adaptive_dt: ERROR"
+                error_suffix="; error type does not warrant retry at alternative value of dt."
+            elif [[ $adaptive_dt_index -lt $((${#adaptive_dt_options[@]}-1)) ]]; then
+                ((adaptive_dt_index++))
+                dt=${adaptive_dt_options[$adaptive_dt_index]}
+
+                error_prefix="adaptive_dt: WARNING"
+                error_suffix=", changing value of dt to $dt."
+                repeat_cycle=true
+            else
+                error_prefix="adaptive_dt: ERROR"
+                error_suffix=", no more alternative values of dt left."
+            fi
+        fi
+        if [[ $adaptive_paramchanges == true ]]; then
+            if [[ $adaptive_paramchanges_active == true ]]; then
+                error_prefix="adaptive_paramchanges: ERROR"
+                error_suffix=", simulation terminated with error despite parameter changes."
+            else
+                error_prefix="adaptive_paramchanges: WARNING"
+                error_suffix=", making changes to parameter values."
+                adaptive_paramchanges_active=true
+                repeat_cycle=true
+            fi
+        fi
+        if [[ $error_desc == *algorithm* ]] && [[ $proceed_on_fatal_algorithm_result == true ]]; then
+            # deal with effect of adaptive_paramchanges here
+            # only progress with proceed_on_fatal_algorithm_result if repeat_cycle was not set to true somewhere else
+            if [[ $repeat_cycle == false ]]; then
+                error_prefix="proceed_on_fatal_algorithm_result: WARNING"
+                error_suffix="; proceeding despite fatal algorithm result."
+                check_lastfwd=false
+            fi
+        fi
+
+        printf "%s -- ROMS %s (cycle: %d, outer loop: %s, inner loop: %s, stage: %s)%s\n" "$error_prefix" "$error_desc" $cycle $(roms4dvarprogress $log_file) "$error_suffix" >&2
+        [[ $error_prefix == *ERROR* ]] && exit 1
+        if [[ $repeat_cycle == true ]]; then
+            if $debug; then
+                echo "debug: continue"
+            fi
+            continue
+        fi
+    fi
+
+    # do not check for last fwd file if proceeding despite fatal algorithm result or in case of a free simulation
+    if [[ $da_adjust == free ]]; then
+        check_lastfwd=false
+    fi
+    if [[ $check_lastfwd == true ]]; then
+        if [[ ! -f "$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" ]]; then
+            raise_error "Cannot find last forward file \"$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )\" (cycle $cycle)."
+        fi
+    fi
+
+    echo " • done running $da_name, moving initial conditions to storage"
+
+    #
+    # Move select files to storage.
+    #
+
+    ini_file_local_new="$storage_dir/${file_prefix}_ini_$(($day+cycle_length)).nc"
+
+    if [[ $ini_filetype == rst ]]; then
+        ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day}.nc" "$ini_file_local_new"
+    elif [[ $ini_filetype == dai ]]; then
+        echo " • using DAI file to generate initial conditions"
+        cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new" 
+    elif [[ $ini_filetype == fwd ]]; then
+        # outdated option but still supported
+        if [[ -z "$cycle_transition_script" ]]; then
+            cycle_transition_script=findsmallestJ.py
+        fi
+
+        cycle_transition_args="--movebestto $storage_dir"
+        if [[ "$cycle_transition_mode" == 1 ]]; then
+            cycle_transition_args="--mode 1 --offset_sec $cycle_transition_offset_sec --movebestto $storage_dir"
+        fi
+        if $cycle_transition_write_NLmodel_value; then
+            cycle_transition_args="$cycle_transition_args --write_NLmodel_value"
+        fi
+        if [[ $proceed_on_fatal_algorithm_result == true ]]; then
+            cycle_transition_args="$cycle_transition_args --ignore_masked"
+        fi
+        $cycle_transition_script $mod_file_local $ini_file_local_new ${FWDname%.nc}*.nc --verbose $cycle_transition_args
+
+        if [[ "$?" -ne "0" ]]; then
+            raise_error "Call to "$cycle_transition_script" failed."
+        fi
+    else
+        raise_error "Value \"$ini_filetype\" not supported for ini_filetype."
+    fi
+
+    if [[ -f "$mod_file_local" ]]; then
+        mv -f "$mod_file_local" "$storage_dir"
+    fi
+    log_file_old="$storage_dir/$log_file"
+    bio_in_old="$storage_dir/$bio_in_local"
+    mv -f "$log_file" "$storage_dir"
+    if [[ "$?" -ne "0" ]]; then
+        raise_error "Incomplete cycle, moving of log file failed."
+    fi
+    if $slice_obsfile; then
+        if $slice_save; then
+            mv -f "$obs_file_slice" "$storage_dir"
+            if [[ "$?" -ne "0" ]]; then
+                raise_error "Moving of sliced observation file failed."
+            fi
+        fi
+    fi
+
+    if [[ -n "$storefiles_mask" ]]; then
+        if $debug; then
+            echo "debug: files being moved to storage (using storefiles_mask):"
+            ls $storefiles_mask
+        fi
+        storefiles_filenames=($storefiles_mask)
+        mv -f $storefiles_mask $storage_dir
+    fi
+
+    # Compress files.
+
+    if [[ $storefiles_compress == true ]]; then
+        compress_args="--deflatelevel $storefiles_compress_deflatelevel"
+        compress_args="$compress_args --nicelevel $storefiles_compress_nicelevel"
+        if [[ $debug == false ]]; then
+            compress_args="$compress_args --quiet"
+        fi
+        if [[ $storefiles_compress_shuffle == false ]]; then
+            compress_args="$compress_args --noshuffle"
+        fi
+        echo " • compressing stored output files"
+        # compress ini_file_local_new in foreground (needed in next cycle)
+        nc_compress -q $compress_args "$ini_file_local_new"
+        # compress rest in background
+        # obs file is not considered to be an output file
+        compress_filenames="$storage_dir/${FWDname%.nc}*.nc"
+        if [[ -f "$storage_dir/$mod_file_local" ]]; then
+            compress_filenames="$compress_filenames $storage_dir/$mod_file_local"
+        fi
+        # also compress files that were just moved to background
+        if [[ -n "$storefiles_mask" ]]; then
+            if [[ ${#storefiles_filenames[@]} -gt 0 ]]; then
+                for filename in ${storefiles_filenames[@]}; do
+                    # but skip fwd files that were included just before
+                    if [[ $filename != ${FWDname%.nc}*.nc ]]; then
+                        compress_filenames="$compress_filenames $storage_dir/$filename"
+                    fi
+                done
+            fi
+        fi
+        if $debug; then
+            echo "debug: to be compressed: \"$compress_filenames\""
+        fi
+        nc_compress $compress_args $compress_filenames &
+    fi
+
+    # Clean directory by removing all remaining netCDF files.
+
+    if $clean_nc; then
+        if $debug; then
+            echo "debug: files being removed:"
+            ls $main_dir/"${file_prefix}"*"$day"*.nc
+        fi
+        /bin/rm -f $main_dir/"${file_prefix}"*"$day"*.nc 2> /dev/null
+    fi
+
+    #---------------------------------------------------------------------
+    # Finish cycle with useful output
+    #---------------------------------------------------------------------
+
+    echo " • finished data assimilation cycle: $cycle"
+
+    if [[ $report_time == true ]]; then
+        cycle_time=$(($(date +%s) - cycle_start))
+        cycle_time_sum=$((cycle_time_sum+cycle_time))
+        printf "   current cycle time: %6ds (%01d:%02d min) / %d day cycle\n" $cycle_time $((cycle_time/60)) $((cycle_time%60)) $cycle_length_orig
+        cycle_time=$((cycle_time_sum/(cycle-cycle_ini))) # avg time
+        printf "   average cycle time: %6ds (%01d:%02d min) / %d day cycle\n" $cycle_time $((cycle_time/60)) $((cycle_time%60)) $cycle_length_orig
+        cycle_rem=$((cycle_num-cycle))
+        if [[ $cycle_length -ne $cycle_length_roms ]]; then
+            printf "   cycles remaining:   %6d (based on %d day cycles; effective %d day cycle progress)\n" $cycle_rem $cycle_length_orig $cycle_length
+        else
+            printf "   cycles remaining:   %6d (based on %d day cycles)\n" $cycle_rem $cycle_length_orig
+        fi
+        if [[ $cycle_rem > 0 ]]; then
+            printf "   current time:       %s\n" "$(date +"%d-%b-%Y %T")"
+            printf "   expected end:       %s\n" "$(date --date="$((cycle_rem*cycle_time)) seconds" +"%d-%b-%Y %T")"
+        fi
+    fi
+
+    #---------------------------------------------------------------------
+    # Advance counters.
+    #---------------------------------------------------------------------
+
+    ((day+=cycle_length))
+    ((cycle++))
+
+    # if adaptive_dt is active, reset dt if required
+    if $adaptive_dt; then
+        if [[ $adaptive_dt_index != -1 ]]; then
+            adaptive_dt_index=-1
+            dt=$dt_orig
+            echo "adaptive_dt: ROMS finished successfully, resetting dt to $dt."
+        fi
+    fi
+    # if adaptive_paramchanges is active, reset
+    if [[ $adaptive_paramchanges == true ]] && [[ $adaptive_paramchanges_active == true ]]; then
+        adaptive_paramchanges_active=false
+        echo "adaptive_paramchanges: ROMS finished successfully, resetting parameter values"
+    fi
+
+    #---------------------------------------------------------------------
+    # Check for break file.
+    #---------------------------------------------------------------------
+
+    if [[ -f "$breakfilename" ]]; then
+        echo " • found break file (\"$breakfilename\") -- removing file and terminating."
+        echo "   restart at ${cycle}:${day}"
+
+        if $breakfile_remove; then
+            if [[ -n "$breakfilename" ]]; then
+                /bin/rm "$breakfilename"
+            fi
+        fi
+
+        echo "DONE - received break signal."
+        exit 0
+    fi
+done
+
+echo "DONE - all DA cycles completed successfully."
+

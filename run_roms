@@ -1,0 +1,466 @@
+#!/bin/bash
+########################################################################
+#                                                                      #
+#  This script is used to start ROMS free (non-assimilative) runs      #
+#                                                                      #
+########################################################################
+#                                                                      #
+#  Written by Paul Mattern                                             #
+#                                                                      #
+########################################################################
+
+VERSION=1.2.3
+
+########################################################################
+#
+# VERSION history/notes
+#
+# 0.8    first numbered version
+# 0.8.1  improved slurm support
+# 0.8.2  bugfix
+# 0.8.3  added support for copy_obsfile
+# 0.8.4  changed default naming of sbatch jobs 
+# 0.9    added obsfile slicing
+# 0.9.1  floating point arithmetic for obsfile slicing 
+# 1.0    added roms_startmode srun
+# 1.1    added support for local storage and epilog_commands
+# 1.2    added roms_startmode sbatch-wait 
+# 1.2.1  improved printed output (embracing unicode) 
+# 1.2.2  bugfix for nobio runs 
+# 1.2.3  improvements to code 
+########################################################################
+
+########################################################################
+#  Function declarations
+########################################################################
+
+function help()
+{
+echo "usage: run_roms [-h] [-c CONFIGFILE] [-m MACHINES] [-d]
+
+Start ROMS free (non-assimilative) simulation.
+
+optional arguments:
+  -h, --help            Show this help message and exit.
+  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
+                        Use the configuration file CONFIGFILE instead of the 
+                        default \"run_roms.config\".
+  -m MACHINES, --machines MACHINES Allows specifying the machines to run 
+                        ROMS on (still requires valid machine file specified 
+                        in configuration).
+                        MACHINES must be a comma-separated list of machines,
+                        e.g. \"node1,node2\"
+  -v, --version         Print \"version $VERSION\" and exit.
+  -d, --debug           Switch on debug mode which will print more output
+                        to standard out.
+"
+}
+
+function raise_error()
+{
+tput setaf 1
+echo "ERROR -- $1" >&2
+tput sgr0
+exit 1
+}
+
+########################################################################
+#  read and evaluate command line options
+########################################################################
+
+# default values for variables that might be set
+
+debug=false
+configfile="run_roms.config"
+sleep_for=""
+machines_input=""
+
+while :
+do
+    case $1 in
+        -h | --help | -\?)
+            help
+            exit 0
+            ;;
+        -v | --version)
+            echo "version $VERSION"
+            exit 0
+            ;;
+        -s | --sleep)
+            sleep_for=$2
+            shift 2
+            ;;
+        -c | --config | --configfile)
+            configfile=$2
+            shift 2
+            ;;
+        --configfile=*)
+            configfile=${1#*=}  # Delete everything up till "="
+            shift
+            ;;
+        -m | --machines)
+            machines_input=$2
+            shift 2
+            ;;
+        -d | --debug)
+            debug=true
+            shift
+            ;;
+        --) # End of all options
+            shift
+            break
+            ;;
+        -*)
+            help
+            raise_error "Unknown option: $1$(tput sgr0)"
+            exit 1
+            ;;
+        *)  # no more options. Stop while loop
+            break
+            ;;
+    esac
+done
+
+tput setaf 4
+printf "┌%$((${COLUMNS:-$(tput cols)}-1))s\n"  '' | sed "s/ /─/g"
+printf "│  run_roms version %s\n" "$VERSION"
+printf "└%$((${COLUMNS:-$(tput cols)}-1))s\n"  '' | sed "s/ /─/g"
+tput sgr0
+
+if $debug; then
+    echo "
+$(tput setaf 1)=== DEBUG MODE$(tput sgr0)"
+    echo "debug=$debug"
+    echo "configfile=$configfile"
+fi
+
+########################################################################
+#  read configuration file
+########################################################################
+
+if [[ ! -f $configfile ]]; then
+    raise_error "Cannot find configuration file \"$configfile\"."
+fi
+
+echo " • reading configuration from \"$configfile\""
+
+#  current script directory (no editing necessary)
+
+script_dir="$( cd "$( dirname "$0" )" && pwd )"
+
+#  current config file directory (no editing necessary)
+
+config_dir=$(dirname $(readlink -f $configfile))
+
+if $debug; then
+    echo "script_dir=$script_dir"
+    echo "config_dir=$config_dir"
+fi
+
+#  read configuration file
+
+source "$configfile"
+
+########################################################################
+#  perform checks 
+########################################################################
+
+nobio=false
+if [[ -z "$bio_in" ]]; then
+    nobio=true
+    echo " • no bio in-file specified, assuming physics-only run"
+fi
+
+# overwrite machines with user input if specified
+if [[ -n "$machines_input" ]]; then
+    machines="$machines_input"
+fi
+
+if [[ ! -f "$executable" ]]; then
+    raise_error "ROMS executable \"$executable\" does not exist."
+fi
+if [[ ! -f "$ocean_in" ]]; then
+    raise_error "ROMS ocean in-file \"$ocean_in\" does not exist."
+fi
+if [[ $nobio == false ]] && [[ ! -f "$bio_in" ]]; then
+    raise_error "ROMS bio in-file \"$bio_in\" does not exist."
+fi
+if [[ $use_verification == true ]] && [[ ! -f "$da_in" ]]; then
+    raise_error "ROMS DA in-file \"$da_in\" does not exist."
+fi
+
+if [[ $use_verification == true ]]; then
+    [[ -z "$slice_obsfile" ]] && slice_obsfile=true
+    [[ -z "$slice_exe" ]] && slice_exe=nc_obsfile
+    [[ -z "$obsfile_local" ]] && obsfile_local="$main_dir/$(basename "$obsfile")"
+    [[ -z "$copy_obsfile" ]] && copy_obsfile=true
+fi
+
+if [[ $roms_startmode == auto ]]; then
+    command -v sbatch >/dev/null 2>&1 && roms_startmode=sbatch
+    if [[ $roms_startmode == auto ]]; then
+        if [[ -n "$machines" ]]; then
+            roms_startmode=mpirun-machines
+        else
+            roms_startmode=mpirun-idlemachines
+        fi
+    fi
+    echo " • switching from roms_startmode \"auto\" to \"$roms_startmode\""
+elif [[ -n "$machines_input" ]] && [[ $roms_startmode != mpirun-machines ]]; then
+    echo " • switching from roms_startmode \"$roms_startmode\" to \"mpirun-machines\""
+    roms_startmode=mpirun-machines
+fi
+
+if [[ $roms_startmode == mpirun* ]]; then
+    if [[ ! -f "$machinefile" ]]; then
+        raise_error "Machine file \"$machinefile\" does not exist."
+    fi
+fi
+if [[ $roms_startmode == sbatch* ]]; then
+    if [[ $roms_startmode != sbatch ]] && [[ $roms_startmode != sbatch-wait ]]; then
+        raise_error "Invalid roms_startmode \"$roms_startmode\"."
+    fi
+    if [[ ! -f "$sbatchtemplate" ]]; then
+        raise_error "Slurm sbatch template file \"$sbatchtemplate\" does not exist."
+    fi
+    if [[ -z "$sbatchfile" ]]; then
+        sbatchfile="sbatch_job.bash"
+    fi
+fi
+
+if [[ -n "$output_local_basedir" ]] && [[ $roms_startmode != s* ]]; then
+    raise_error "Local storage is currently only supported for Slurm jobs with roms_startmode \"sbatch\", \"srun\", \"srun-bg\"." 
+fi
+
+##############################################################################
+#  local storage
+##############################################################################
+
+if [[ -n "$output_local_basedir" ]]; then
+    output_dir_files="$output_local_basedir/run_roms_$(date --iso-8601=seconds | tr -d ':')_$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)"
+
+    if [[ -z "$SLURM_JOB_ID" ]]; then
+        raise_error "The variable SLURM_JOB_ID must be set for runs using local storage."
+    fi
+    local_node=$(squeue -j $SLURM_JOB_ID --format="%R" --noheader)
+    if $debug ; then
+        echo "job $SLURM_JOB_ID is running on \"$local_node\""
+    fi
+
+    echo " • creating local storage directory on ${local_node}:
+   \"$output_dir_files\""
+
+    ssh $local_node -n "mkdir \"$output_dir_files\""
+else
+    output_dir_files="$output_dir_relative"
+fi
+
+##############################################################################
+#  adjust parameters
+##############################################################################
+
+
+# copy in-files
+cp "$ocean_in" "$main_dir"
+ocean_in_local="$main_dir/$(basename $ocean_in)"
+
+if [[ $nobio == false ]]; then
+    cp "$bio_in" "$main_dir"
+    bio_in_local="$main_dir/$(basename $bio_in)"
+    rif_setvar "$ocean_in_local" BPARNAM "$(basename "$bio_in_local")"
+fi
+
+if [[ -n "${paramchanges_ocean}" ]]; then
+    echo " • parameter changes to \"$(basename $ocean_in)\":"
+    # parse
+    for namevaluepair in "${paramchanges_ocean[@]}"; do
+        name="${namevaluepair%%=*}"
+        value="${namevaluepair##*=}"
+        printf "   %s = %s\n" "$name" "$value"
+        rif_setvar "$ocean_in_local" "$name" "$value" || echo " ! Error setting variable"
+    done
+fi
+
+if [[ $nobio == false ]]; then
+    echo " • parameter changes to \"$(basename $bio_in)\":"
+    # parse
+    for namevaluepair in "${paramchanges_bio[@]}"; do
+        name="${namevaluepair%%=*}"
+        value="${namevaluepair##*=}"
+        printf "   %s = %s\n" "$name" "$value"
+        rif_setvar "$bio_in_local" "$name" "$value" || echo " ! Error setting variable"
+    done
+fi
+
+if [[ $use_verification == true ]]; then
+    cp "$da_in" "$main_dir"
+    da_in_local="$main_dir/$(basename $da_in)"
+    
+    rif_setvar "$ocean_in_local" APARNAM "$(basename "$da_in_local")"
+    
+    if [[ $slice_obsfile == true ]]; then
+        #slice_args="--overwrite --includemaxdatenum"
+        slice_args="--overwrite"
+        
+        day_start="$(rif_getvar "$ocean_in_local" DSTART | sed -e "s/d0//" -e "s/\.0*//" )"
+        ntimes="$(rif_getvar "$ocean_in_local" NTIMES | sed -e "s/d0//" -e "s/\.0*//" )"
+
+        [[ -z "$num_dt_buffer" ]] && num_dt_buffer=0
+
+        dt="$(rif_getvar "$ocean_in_local" DT | sed -e "s/d0//" -e "s/\.0*//")"
+        #day_end=$((day_start + ntimes*dt/86400))
+        #day_end="$(bc -l <<< "$day_start+$ntimes*$dt/86400")"
+        day_end="$(bc -l <<< "$day_start+(${ntimes}-${num_dt_buffer})*$dt/86400")"
+        
+        if $debug; then
+            echo "day_start=${day_start}; ntimes=${ntimes}; dt=${dt}; day_end=${day_end}; num_dt_buffer=${num_dt_buffer}"
+        fi
+
+        echo " • slicing obsfile (from $day_start to ${day_end%.00000000000000000000} to create \"$(basename $obsfile_local)\"."
+        if $debug; then
+            echo "debug: executing: $slice_exe slice \"$obsfile\" --datenum \"$day_start:$day_end\" --out \"$obsfile_local\" ${slice_args}"
+        fi
+        $slice_exe slice "$obsfile" --datenum "$day_start:$day_end" --out "$obsfile_local" ${slice_args}
+        [[ $? -ne 0 ]] && raise_error "Slicing of obsfile failed."
+        rif_setvar "$da_in_local" OBSname "$obsfile_local"
+    elif [[ $copy_obsfile == true ]]; then
+        cp "$obsfile" "$obsfile_local"
+        rif_setvar "$da_in_local" OBSname "$obsfile_local"
+    else
+        rif_setvar "$da_in_local" OBSname "$obsfile" 
+    fi
+    rif_setvar "$da_in_local" MODname "$(printf "$output_dir_files/$outputfile_mask" mod )" 
+fi
+
+np=$(rif_getvar $ocean_in_local NtileI)
+let np*=$(rif_getvar $ocean_in_local NtileJ)
+
+output_dir="$config_dir/$output_dir_relative"
+if $debug; then
+    echo "debug: output_dir=\"$output_dir\""
+fi
+if [ ! -d $output_dir ]; then
+    echo " • creating output directory"
+    mkdir $output_dir
+fi
+
+echo " • renaming output files"
+outvarnames=( gst rst his tlm tlf adj avg dia sta flt )
+for outname in ${outvarnames[*]}; do
+    outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]') 
+    rif_setvar "$ocean_in_local" "$outname_full" $(printf "$output_dir_files/$outputfile_mask" $outname)
+done
+
+##############################################################################
+#  Slurm prolog/epilog
+##############################################################################
+
+if [[ $roms_startmode == s* ]]; then
+    slurmargs=""
+
+    if [[ -n "$output_local_basedir" ]] || [[ -n "$epilog_commands" ]]; then
+        epilogfile="$main_dir/.run_roms_epilog.bash"
+        echo "#!/bin/bash" > "$epilogfile"
+    fi
+    if [[ -n "$epilog_commands" ]]; then
+        sed -e "s/<outdir>/${output_dir_files//\//\\/}/g" -e "s/<node>/${local_node}/g" <<< "$epilog_commands" >> "$epilogfile"
+    fi
+
+    if [[ -n "$output_local_basedir" ]]; then
+        # this early attempt does not appear to work as prolog is not executed on 
+        # node
+         
+        #prologfile="$main_dir/.run_roms_prolog.bash"
+        #echo "#!/bin/bash" > "$prologfile"
+        #echo "mkdir -p \"$output_dir_files\"" >> "$prologfile"
+        #chmod a+x "$prologfile"
+
+        #slurmargs="$slurmargs --prolog=$prologfile"
+
+        #if $debug; then
+        #   echo "<content of prolog file>"
+        #   cat "$prologfile"
+        #   echo "</content of prolog file>"
+        #fi
+
+        echo "rsync --remove-source-files -azu $local_node:\"$output_dir_files/*\" \"$output_dir/\"" >> "$epilogfile"
+        echo "ssh $local_node -n 'rmdir \"$output_dir_files\"'" >> "$epilogfile"
+        chmod a+x "$epilogfile"
+
+        slurmargs="$slurmargs --epilog=$epilogfile"
+
+        if $debug; then
+           echo "<content of epilog file>"
+           cat "$epilogfile"
+           echo "</content of epilog file>"
+        fi
+    fi
+fi
+
+##############################################################################
+#  start ROMS
+##############################################################################
+
+echo " • starting ROMS"
+if [[ $roms_startmode == mpirun-machines ]]; then
+    echo "   using the following machines: \"$machines\""
+    mpirun -np $np -machinefile $machinefile -host "$machines" $executable $ocean_in_local > $logfile
+    echo " • ROMS terminated"
+elif [[ $roms_startmode == mpirun ]]; then
+    mpirun -np $np -machinefile $machinefile $executable $ocean_in_local > $logfile
+    echo " • ROMS terminated"
+elif [[ $roms_startmode == mpirun-idlemachines ]]; then
+    machines="$(idlemachines $machinefile -n $np)"
+    if [[ -z "$machines" ]]; then
+        raise_error "No idle machines found."
+    fi
+    echo "   using the following idle machines: \"$machines\""
+    mpirun -np $np -hostfile $machinefile -host "$machines" $executable $ocean_in_local > $logfile
+elif [[ $roms_startmode == srun ]]; then
+    srun $slurmargs --ntasks $np $executable $ocean_in_local > $logfile
+    echo " • ROMS terminated"
+elif [[ $roms_startmode == srun-bg ]]; then
+    # same as srun but job is run in background
+    srun $slurmargs --ntasks $np $executable $ocean_in_local > $logfile &
+elif [[ $roms_startmode == sbatch* ]]; then
+    # use sbatch to start job
+    
+    if [[ "$sbatchname" == *%s* ]]; then
+        sbatchname=$(printf "$sbatchname" $(date --iso=m))
+    elif [[ -z "$sbatchname" ]]; then
+        sbatchname="run_roms-$(basename "$config_dir")"
+    fi
+    
+    cp "$sbatchtemplate" "$sbatchfile"
+
+    
+    # if ntasks-per-node is set, use np (ntasks) to set nodes
+    ntasks_per_node=$(sed -n "s/^#SBATCH  *--ntasks-per-node= *\([0-9][0-9]*\) .*/\1/p" < "$sbatchfile")
+    sbatchargs="$slurmargs"
+    if [[ -n "$ntasks_per_node" ]] ; then
+        nodes=1
+        while [[ $((np > nodes*ntasks_per_node)) == 1 ]]; do
+            ((nodes++))
+        done
+        if [[ $nodes -ne $nodes_old ]]; then
+            echo "   adjusting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${np})" 
+        fi
+        sbatchargs="$sbatchargs --nodes=$nodes"
+    fi
+    # remove log file if it is present
+    [[ -f "$logfile" ]] && rm -f "$logfile"
+    echo "   submitting job with name \"$sbatchname\""
+    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatchargs --output="$logfile" "$sbatchfile")"
+    echo "   $tmp"
+    # tmp is something like "Submitted batch job 15211"
+    if [[ $roms_startmode == sbatch-wait ]]; then
+        jobid=$(cut -d ' ' -f 4 <<< "$tmp")
+        echo "   waiting until job with id $jobid terminates"
+        while [[ -n "$(squeue -j $jobid --noheader)" ]] ; do
+            sleep 5s
+        done
+    fi
+else
+    mpirun -np $np $executable $ocean_in_local > $logfile
+fi
+

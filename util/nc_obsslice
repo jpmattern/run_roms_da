@@ -1,0 +1,112 @@
+#!/bin/bash
+
+obsfile=
+outfile=
+t0=
+t1=
+includemaxdatenum=false
+overwrite=false
+debug=false
+
+function raise_error()
+{
+echo "ERROR -- $1" >&2
+exit 1
+}
+
+function help()
+{
+echo "usage: nc_obsslice [-i] [-O] OBSFILE MINDATE MAXDATE OUTFILE
+
+Slice OBSFILE for date number interval [MINDATE,MAXDATE[ to create OUTFILE.
+
+optional arguments:
+  -i, --includemaxdatenum   Include the maximum date number, so that the interval
+                            becomes [MINDATE,MAXDATE].
+  -O, --overwrite           Overwrite OUTFILE if it exists.
+"
+}
+
+while [[ -n "$1" ]]; do
+    case "$1" in
+        -h | --help )
+            help
+            exit 0
+            ;;
+        -i | --includemaxdatenum )
+            includemaxdatenum=true
+            shift
+            ;;
+        -O | --overwrite )
+            overwrite=true
+            shift
+            ;;
+        -d | --debug )
+            debug=true
+            shift
+            ;;
+        -- ) # end of all options
+            shift
+            break
+            ;;
+        -* | --*)
+            help
+            raise_error "Unknown option \"$1\"."
+            ;;
+        * )
+            if [[ $1 =~ ^[0-9.]*$ ]]; then
+                if [[ -z "$t0" ]]; then
+                    t0="$1"
+                elif [[ -z "$t1" ]]; then
+                    t1="$1"
+                else
+                    raise_error "Expected 2 date numbers, received 3 (\"$1\")."
+                fi
+            elif [[ -z "$obsfile" ]]; then
+                obsfile="$1"
+            elif [[ -z "$outfile" ]]; then
+                outfile="$1"
+            else
+                raise_error "Expected 2 filenames, received 3 (\"$1\")." 
+            fi
+            shift
+            ;;
+    esac
+done
+
+if $debug ; then
+    echo "debug: t0=$t0
+debug: t1=$t1
+debug: obsfile=$obsfile
+debug: outfile=$outfile"
+fi
+
+if [[ -z "$outfile" ]]; then
+    raise_error "Expected output filename."
+fi
+if [[ -z "$t1" ]]; then
+    raise_error "Expected 2 date numbers."
+fi
+
+[[ $t0 != *.* ]] && t0="${t0}.0"
+[[ $t1 != *.* ]] && t1="${t1}.0"
+
+ncksargs=""
+if $overwrite; then
+    ncksargs="$ncksargs --overwrite"
+fi
+
+tmpfile="${outfile}.pid$$.ncksobsslice.tmp"
+
+ncap2 -O -s "datum=obs_time; survey=survey_time;" "$obsfile" "$tmpfile"
+if $includemaxdatenum; then
+    range="$t0,$t1"
+else
+    range="$t0,$(bc -l <<< "${t1}-0.0000000001")"
+fi
+if $debug ; then
+    echo "debug: range=$range"
+fi
+ncks $ncksargs -C -x -v datum -v survey -d datum,$range -d survey,$range "$tmpfile" "$outfile"
+rm -f "$tmpfile"
+
