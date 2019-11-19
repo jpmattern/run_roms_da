@@ -9,26 +9,14 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.2.4
+VERSION=0.8.1
 
 ########################################################################
 #
 # VERSION history/notes
 #
-# 0.8    first numbered version
-# 0.8.1  improved slurm support
-# 0.8.2  bugfix
-# 0.8.3  added support for copy_obsfile
-# 0.8.4  changed default naming of sbatch jobs 
-# 0.9    added obsfile slicing
-# 0.9.1  floating point arithmetic for obsfile slicing 
-# 1.0    added roms_startmode srun
-# 1.1    added support for local storage and epilog_commands
-# 1.2    added roms_startmode sbatch-wait 
-# 1.2.1  improved printed output (embracing unicode) 
-# 1.2.2  bugfix for nobio runs 
-# 1.2.3  improvements to code 
-# 1.2.4  added check 
+# 0.8    first github version
+# 0.8.1  adding util subdirectory to PATH, using nc_obsslice 
 ########################################################################
 
 ########################################################################
@@ -135,6 +123,18 @@ $(tput setaf 1)=== DEBUG MODE$(tput sgr0)"
     echo "configfile=$configfile"
 fi
 
+#  current script directory (no editing necessary)
+script_dir="$( cd "$( dirname "$0" )" && pwd )"
+
+#  current config file directory (no editing necessary)
+config_dir=$(dirname $(readlink -f $configfile))
+
+# add directory with utility scripts to PATH and check if all required commands are available
+export PATH="${script_dir}:${script_dir}/util:${PATH}"
+for cmd in rif_setvar rif_isvar rif_getvar nc_obsslice ; do 
+    command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
+done
+
 ########################################################################
 #  read configuration file
 ########################################################################
@@ -145,13 +145,6 @@ fi
 
 echo " • reading configuration from \"$configfile\""
 
-#  current script directory (no editing necessary)
-
-script_dir="$( cd "$( dirname "$0" )" && pwd )"
-
-#  current config file directory (no editing necessary)
-
-config_dir=$(dirname $(readlink -f $configfile))
 
 if $debug; then
     echo "script_dir=$script_dir"
@@ -211,7 +204,7 @@ fi
 
 if [[ $use_verification == true ]]; then
     [[ -z "$slice_obsfile" ]] && slice_obsfile=true
-    [[ -z "$slice_exe" ]] && slice_exe=nc_obsfile
+    [[ -z "$slice_exe" ]] && slice_exe=nc_obsslice
     [[ -z "$obsfile_local" ]] && obsfile_local="$main_dir/$(basename "$obsfile")"
     [[ -z "$copy_obsfile" ]] && copy_obsfile=true
 fi
@@ -338,9 +331,9 @@ if [[ $use_verification == true ]]; then
 
         echo " • slicing obsfile (from $day_start to ${day_end%.00000000000000000000} to create \"$(basename $obsfile_local)\"."
         if $debug; then
-            echo "debug: executing: $slice_exe slice \"$obsfile\" --datenum \"$day_start:$day_end\" --out \"$obsfile_local\" ${slice_args}"
+            echo "debug: executing: $slice_exe $slice_args \"$obsfile\" \"$day_start\" \"$day_end\" \"$obsfile_local\""
         fi
-        $slice_exe slice "$obsfile" --datenum "$day_start:$day_end" --out "$obsfile_local" ${slice_args}
+        $slice_exe $slice_args "$obsfile" "$day_start" "$day_end" "$obsfile_local"
         [[ $? -ne 0 ]] && raise_error "Slicing of obsfile failed."
         rif_setvar "$da_in_local" OBSname "$obsfile_local"
     elif [[ $copy_obsfile == true ]]; then
