@@ -1,14 +1,18 @@
-# run_roms_da
+# run_roms_da and run_roms
 
-A script to automate [ROMS](https://www.myroms.org/) data assimilation.
- * automates file renaming, starting of ROMS (via call to `mpirun` or via `sbatch` job submission), ROMS observation-file slicing, etc.
- * works with configuration files, storing the information of each data assimilation run in a single file
+`run_roms_da` is a script to automate [ROMS](https://www.myroms.org/) data assimilation, `run_roms` starts non-assimilative simulations.
+ * automated file renaming, starting of ROMS (via call to `mpirun` or via `sbatch` job submission), ROMS observation-file slicing, etc.
+ * work with configuration files, storing the information of each data assimilation run in a single file
  * written in bash
- * requires [NCO toolkit](http://nco.sourceforge.net/) and a working ROMS data assimilation setup
+ * require [NCO toolkit](http://nco.sourceforge.net/) and a working ROMS data assimilation setup
 
 ### Note
 
-`run_roms_da` creates new files and directories and removes old files, use at your own risk. Data files that are potentially modified by ROMS, such as the initial and observation files are copied by `run_roms_da`, so that the original is left unchanged.
+`run_roms_da` and `run_roms` create new files and directories and remove old files, use at your own risk. Data files that are potentially modified by ROMS, such as the initial and observation files are copied by `run_roms_da`, so that the original is left unchanged.
+
+## Installation
+
+No installation required: After downloading, add the directory containing `run_roms_da` to the `PATH` variable or simply execute in a shell using its full path.
 
 ## How it works
 
