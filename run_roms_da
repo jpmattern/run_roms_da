@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.3
+VERSION=0.9.4
 
 ########################################################################
 #
@@ -20,6 +20,7 @@ VERSION=0.9.3
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
 # 0.9.3     added error message when failing to read configuration
+# 0.9.4     improved restart behavior and reading of log-file
 ########################################################################
 
 ########################################################################
@@ -760,35 +761,36 @@ fi
 cd $main_dir
 
 if $perform_restart; then
-    logfiles=(${roms_logfile_mask//%d/*})
-    if [[ ${#logfiles[@]} > 1 ]]; then
-        echo "WARNING -- Found more than one log file, using last." >&2
-    elif [[ ${#logfiles[@]} == 0 ]]; then
-        echo "WARNING -- Found 0 log files, searching in storage." >&2
-        logfiles=($storage_dir/${roms_logfile_mask//%d/*})
-        if [[ ${#logfiles[@]} == 0 ]]; then
-            raise_error "Found no log files in base directory or storage."
-        fi
-    fi
     # look for "restart at X:Y" first where X=cycle Y=day (must be the last entry behind "starting data assimilation cycle")
     # use day to temporarily hold whole string
     day=$(egrep '(starting data assimilation cycle|restart at)' "$run_roms_logfile" | tail -n 1 | grep 'restart at')
     if [[ -n "$day" ]]; then
         day="$(sed -n "s/.*restart  *at  *\([0-9]\{1,\}\):\([0-9]\{1,\}\).*/\1:\2/p" <<< "$day")"
-        echo "restart: using restart information in DA log file: \"$day\""
+        echo "restart: using restart information in run_roms_da log file: \"$day\""
         cycle=${day%:*}
         day=${day#*:}
     else
-        day=$(echo ${logfiles[$((${#logfiles[@]}-1))]} | sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p")
-        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running $da_name algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
+        logfiles=($main_dir/${roms_logfile_mask//%d/*})
+        if [[ ${#logfiles[@]} > 1 ]]; then
+            echo "WARNING -- Found more than one log file in \"$main_dir\", using last." >&2
+        elif [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
+            echo "WARNING -- Found 0 log files in \"$main_dir\", searching in storage." >&2
+            logfiles=($storage_dir/${roms_logfile_mask//%d/*})
+            if [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
+                raise_error "Found no log files in base directory or storage."
+            fi
+        fi
+        logfile="${logfiles[$((${#logfiles[@]}-1))]}"
+        day=$(sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p" <<< "$logfile")
+        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running .* algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
         if [[ -z "$day" ]]; then
-            echo "WARNING -- Cannot find day in ROMS log file, using day from DA log." >&2
+            echo "WARNING -- Cannot find day in ROMS log file, using day from run_roms_da log." >&2
             day="$day_log"
             if [[ -z "$day" ]]; then
-                raise_error "Cannot find day in DA log file."
+                raise_error "Cannot find day in run_roms_da log file."
             fi
         elif [[ "$day" -ne "$day_log" ]]; then
-            raise_error "Day in ROMS log file ($day) does not agree with day in DA log ($day_log). Are multiple ROMS log-files present?"
+            raise_error "Day in ROMS log file ($day) does not agree with day in run_roms_da log ($day_log). Are multiple ROMS log-files present?"
         fi
         cycle=$(tail -n 1000 "$run_roms_logfile" | tac | sed -n "1,/^ • starting data assimilation/ s/^ • starting data assimilation cycle: *\([0-9]\{1,\}\).*/\1/p")
         if [[ -z "$cycle" ]]; then
@@ -806,7 +808,7 @@ if $perform_restart; then
     fi
 
     if $perform_test; then
-        echo "TEST MODE == QUITTING"
+        echo "test mode (-t/--test) -- quitting"
         exit 0
     fi
 fi
