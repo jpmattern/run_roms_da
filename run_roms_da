@@ -42,6 +42,11 @@ optional arguments:
                         the last started cycle failed. Extending a run may 
                         require to extend the \"stop_day\" variable in the
                         configuration file).
+  -t, --test            Combine with the -r/--restart or -e/--extend option
+                        to examine the restart cycle and day without 
+                        actually performing a restart or writing any files.
+                        Using this option by iself automatically invokes
+                        the -r/--restart option.
   -f, --force           Forces clean start, may overwrite previous results. 
   -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
                         Use the configuration file CONFIGFILE instead of the 
@@ -774,7 +779,7 @@ if $perform_restart; then
         if [[ ${#logfiles[@]} > 1 ]]; then
             echo "WARNING -- Found more than one log file in \"$main_dir\", using last." >&2
         elif [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
-            echo "WARNING -- Found 0 log files in \"$main_dir\", searching in storage." >&2
+            echo "restart: Found 0 log files in \"$main_dir\", searching in storage." >&2
             logfiles=($storage_dir/${roms_logfile_mask//%d/*})
             if [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
                 raise_error "Found no log files in base directory or storage."
@@ -799,12 +804,12 @@ if $perform_restart; then
         unset day_log
     fi
     if $perform_restart_extend; then
-        echo "restart: identified cycle $cycle (day $day) as the last finished cycle, extending run"
+        echo "restart: Identified cycle $cycle (day $day) as the last finished cycle, extending run."
         ((day+=cycle_length))
         ((cycle++))
         echo "restart: extending run starting at current cycle $cycle (day $day)"
     else
-        echo "restart: identified cycle $cycle as the current cycle, day $day as the current day, attempting restart"
+        echo "restart: Identified cycle $cycle as the current cycle, day $day as the current day, attempting restart."
     fi
 
     if $perform_test; then
