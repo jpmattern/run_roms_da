@@ -4,7 +4,7 @@
  * automated file renaming, starting of ROMS (via call to `mpirun` or via `sbatch` job submission), ROMS observation-file slicing, etc.
  * work with configuration files, storing the information of each data assimilation run in a single file
  * written in bash
- * require [NCO toolkit](http://nco.sourceforge.net/) and a working ROMS data assimilation setup
+ * requires [NCO toolkit](http://nco.sourceforge.net/) and a working ROMS data assimilation setup
 
 ### Note
 
