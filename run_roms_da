@@ -65,7 +65,7 @@ optional arguments:
 function raise_error()
 {
 #tput setaf 1
-echo "ERROR -- $1" >&2
+echo "ERROR – $1" >&2
 #tput sgr0
 exit 1
 }
@@ -147,7 +147,7 @@ while [[ -n "$1" ]]; do
             break
             ;;
         *)
-            echo "$(tput setaf 1)ERROR -- Unknown option: \"$1\"$(tput sgr0)" >&2
+            echo "$(tput setaf 1)ERROR – Unknown option: \"$1\"$(tput sgr0)" >&2
             help
             exit 1
             ;;
@@ -383,7 +383,7 @@ if [[ -z "$breakfilename" ]]; then
     breakfilename=".stop_run_roms_da"
 fi
 if [[ -f "$main_dir/$breakfilename" ]]; then
-    echo "WARNING -- break file present, this will lead to termination after the next cycle if it is not removed."
+    echo "WARNING – break file present, this will lead to termination after the next cycle if it is not removed."
 fi
 
 if [[ -z "$breakfile_remove" ]]; then
@@ -432,7 +432,7 @@ if [[ $roms_startmode == auto ]]; then
     echo "   switching from ROMS startmode \"auto\" to \"$roms_startmode\"."
 elif [[ -n "$machines_input" ]]; then
     if [[ $roms_startmode != mpirun* ]]; then
-        echo "WARNING -- ROMS startmode \"$roms_startmode\" does not support specification of machines using --machines (-m)."
+        echo "WARNING – ROMS startmode \"$roms_startmode\" does not support specification of machines using --machines (-m)."
     elif [[ $roms_startmode != mpirun-machines ]]; then
         echo "   switching from ROMS startmode \"$roms_startmode\" to \"mpirun-machines\""
         roms_startmode=mpirun-machines
@@ -493,7 +493,7 @@ fi
 if [[ "$perform_restart" == false ]] && [[ "$force_freshstart" == false ]]; then
     logfiles=( $storage_dir/${roms_logfile_mask//%d/*} )
     if [[ -d $storage_dir ]] && [[ -f ${logfiles[0]} ]]; then
-        echo "Old log files found -- Are you sure you want to continue and possibly erase old files?"
+        echo "Old log files found – Are you sure you want to continue and possibly erase old files?"
         select res in "Continue as is and possibly erase old files (equivalent to --force option)." "Attempt a restart from existing files (equivalent to --restart option)." "Abort."; do
             case $REPLY in
                 1 ) break ;;
@@ -777,7 +777,7 @@ if $perform_restart; then
     else
         logfiles=($main_dir/${roms_logfile_mask//%d/*})
         if [[ ${#logfiles[@]} > 1 ]]; then
-            echo "WARNING -- Found more than one log file in \"$main_dir\", using last." >&2
+            echo "WARNING – Found more than one log file in \"$main_dir\", using last." >&2
         elif [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
             echo "restart: Found 0 log files in \"$main_dir\", searching in storage." >&2
             logfiles=($storage_dir/${roms_logfile_mask//%d/*})
@@ -789,7 +789,7 @@ if $perform_restart; then
         day=$(sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p" <<< "$logfile")
         day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running .* algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
         if [[ -z "$day" ]]; then
-            echo "WARNING -- Cannot find day in ROMS log file, using day from run_roms_da log." >&2
+            echo "WARNING – Cannot find day in ROMS log file, using day from run_roms_da log." >&2
             day="$day_log"
             if [[ -z "$day" ]]; then
                 raise_error "Cannot find day in run_roms_da log file."
@@ -813,7 +813,7 @@ if $perform_restart; then
     fi
 
     if $perform_test; then
-        echo "test mode (-t/--test) -- quitting"
+        echo "test mode (-t/--test) – quitting"
         exit 0
     fi
 fi
@@ -1357,7 +1357,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
                     numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
                 done
             fi
-            echo "   found ${machines_numidle} idle machines -- proceeding"
+            echo "   found ${machines_numidle} idle machines – proceeding"
         fi
         echo "   submitting job with name \"$sbatch_name\""
         if $use_sbatch_donefile ; then
@@ -1461,7 +1461,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
             fi
         fi
 
-        printf "%s -- ROMS %s (cycle: %d, outer loop: %s, inner loop: %s, stage: %s)%s\n" "$error_prefix" "$error_desc" $cycle $(roms4dvarprogress $log_file) "$error_suffix" >&2
+        printf "%s – ROMS %s (cycle: %d, outer loop: %s, inner loop: %s, stage: %s)%s\n" "$error_prefix" "$error_desc" $cycle $(roms4dvarprogress $log_file) "$error_suffix" >&2
         [[ $error_prefix == *ERROR* ]] && exit 1
         if [[ $repeat_cycle == true ]]; then
             if $debug; then
@@ -1643,7 +1643,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     #---------------------------------------------------------------------
 
     if [[ -f "$breakfilename" ]]; then
-        echo " • found break file (\"$breakfilename\") -- removing file and terminating."
+        echo " • found break file (\"$breakfilename\") – removing file and terminating."
         echo "   restart at ${cycle}:${day}"
 
         if $breakfile_remove; then
