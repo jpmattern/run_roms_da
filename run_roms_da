@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.4
+VERSION=0.9.5
 
 ########################################################################
 #
@@ -21,6 +21,8 @@ VERSION=0.9.4
 # 0.9.2     adding util subdirectory to PATH
 # 0.9.3     added error message when failing to read configuration
 # 0.9.4     improved restart behavior and reading of log-file
+# 0.9.5     support for new ROMS output file format "outer0" and old
+#           "000"
 ########################################################################
 
 ########################################################################
@@ -1476,8 +1478,10 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         check_lastfwd=false
     fi
     if [[ $check_lastfwd == true ]]; then
-        if [[ ! -f "$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" ]]; then
-            raise_error "Cannot find last forward file \"$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )\" (cycle $cycle)."
+        lastfwd1="$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" 
+        lastfwd2="$(printf "%s_outer%d.nc" ${FWDname%.nc} $Nouter )" 
+        if [[ ! -f "$lastfwd1" ]] && [[ ! -f "$lastfwd2" ]]; then
+            raise_error "Cannot find last forward file \"${lastfwd1}\" or \"${lastfwd2}\" (cycle $cycle)."
         fi
     fi
 
