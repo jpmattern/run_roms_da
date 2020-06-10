@@ -858,7 +858,7 @@ while [[ $day -lt $stop_day ]]; do
     echo " • starting data assimilation cycle: $cycle ($cycle_date, day $day)"
 
     # %-m returns month without any leading zeros
-    cur_month=$(date --date=@$day_unix +"%-m")
+    cur_month=$(date -u --date=@$day_unix +"%-m")
     if $debug; then
         echo "debug: current month=$cur_month"
     fi
