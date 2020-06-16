@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.5
+VERSION=0.9.6
 
 ########################################################################
 #
@@ -23,6 +23,7 @@ VERSION=0.9.5
 # 0.9.4     improved restart behavior and reading of log-file
 # 0.9.5     support for new ROMS output file format "outer0" and old
 #           "000"
+# 0.9.6     exit with error if setting of in-file variables fails
 ########################################################################
 
 ########################################################################
@@ -1078,7 +1079,7 @@ while [[ $day -lt $stop_day ]]; do
             if [[ $cycle == 1 ]] || $debug; then
                 printf "   %s = %s\n" "$name" "$value"
             fi
-            rif_setvar "$ocean_in_local" "$name" "$value" || echo " ! Error setting variable"
+            rif_setvar "$ocean_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"."
         done
     elif [[ $cycle == 1 ]] || $debug; then
         echo " • no parameter changes to \"$(basename $ocean_in_local)\""
@@ -1177,7 +1178,7 @@ while [[ $day -lt $stop_day ]]; do
                 if [[ $cycle == 1 ]] || $debug; then
                     printf "   %s = %s\n" "$name" "$value"
                 fi
-                rif_setvar "$da_in_local" "$name" "$value" || echo " ! Error setting variable"
+                rif_setvar "$da_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"." 
             done
         #elif [[ $cycle == 1 ]] || $debug; then
         #    echo " • no parameter changes to \"$(basename $da_in_local)\""
