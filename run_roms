@@ -48,7 +48,7 @@ optional arguments:
 function raise_error()
 {
 tput setaf 1
-echo "ERROR -- $1" >&2
+echo "ERROR – $1" >&2
 tput sgr0
 exit 1
 }

@@ -2,7 +2,7 @@
 
 if [ $# -lt 3 -o $# -gt 4 ]
 then
-    echo "ERROR -- Three or four input arguments required." >&2
+    echo "ERROR – Three or four input arguments required." >&2
     exit 1
 fi
 
@@ -18,18 +18,18 @@ fi
 
 if [ ! -e $infile ]
 then
-    echo "ERROR -- File \"$infile\" does not exist." >&2
+    echo "ERROR – File \"$infile\" does not exist." >&2
     exit 1
 fi
 if [ ! -f $infile ]
 then
-    echo "ERROR -- \"$infile\" is not a regular file." >&2
+    echo "ERROR – \"$infile\" is not a regular file." >&2
     exit 1
 fi
 varcheck=`grep -on "^\(\ *$varname\ *=\{1,2\}\ *\)\([^!]*[^! ]\)" $infile | wc -l`
 if [ $varcheck = 0 ]
 then
-    echo "ERROR -- Variable \"$varname\" does not exist." >&2
+    echo "ERROR – Variable \"$varname\" does not exist." >&2
     exit 1
 fi
 
