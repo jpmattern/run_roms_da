@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.8.1
+VERSION=0.8.2
 
 ########################################################################
 #
@@ -17,6 +17,7 @@ VERSION=0.8.1
 #
 # 0.8    first github version
 # 0.8.1  adding util subdirectory to PATH, using nc_obsslice 
+# 0.8.2  exit with error if setting of in-file variables fails 
 ########################################################################
 
 ########################################################################
@@ -290,7 +291,7 @@ if [[ -n "${paramchanges_ocean}" ]]; then
         name="${namevaluepair%%=*}"
         value="${namevaluepair##*=}"
         printf "   %s = %s\n" "$name" "$value"
-        rif_setvar "$ocean_in_local" "$name" "$value" || echo " ! Error setting variable"
+        rif_setvar "$ocean_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"."
     done
 fi
 
@@ -301,7 +302,7 @@ if [[ $nobio == false ]]; then
         name="${namevaluepair%%=*}"
         value="${namevaluepair##*=}"
         printf "   %s = %s\n" "$name" "$value"
-        rif_setvar "$bio_in_local" "$name" "$value" || echo " ! Error setting variable"
+        rif_setvar "$bio_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"."
     done
 fi
 
