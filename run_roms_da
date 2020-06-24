@@ -1495,11 +1495,13 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     ini_file_local_new="$storage_dir/${file_prefix}_ini_$(($day+cycle_length)).nc"
 
     if [[ $ini_filetype == rst ]]; then
+        echo " • using RST file to generate initial conditions"
         ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == dai ]]; then
         echo " • using DAI file to generate initial conditions"
         cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new" 
     elif [[ $ini_filetype == fwd ]]; then
+        echo " • using FWD file to generate initial conditions"
         # outdated option but still supported
         if [[ -z "$cycle_transition_script" ]]; then
             cycle_transition_script=findsmallestJ.py
