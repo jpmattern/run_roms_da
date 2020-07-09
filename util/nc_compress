@@ -1,0 +1,544 @@
+#!/bin/bash
+# written by Paul Mattern
+
+VERSION=1.5.4
+
+# VERSION history
+# 1.1    added preservation of file attributes
+# 1.2    changed order of copying and compression
+# 1.3    added file size change information
+# 1.3.1  minor bugfix
+# 1.4    support for packing (and unpacking)
+# 1.4.1  added --archive-slow, fixed small bug
+# 1.4.2  fixed small bug
+# 1.4.3  added --carefulpacking option
+# 1.4.4  added --printchanges option 
+# 1.5    pack only certain variables, switched
+#        from opt-in (--carefulpacking) to 
+#        opt-out (--forcepacking)
+# 1.5.1  New --packvariables option.
+# 1.5.2  Bugfix for packing command, see
+#        https://sourceforge.net/p/nco/discussion/9830/thread/389b9cf790/
+# 1.5.3  more exit 1 statements, print pid
+# 1.5.4  fixed small bug introduced in 1.5.3
+
+deflatelevel=1
+nicelevel=10
+shuffle=true
+skipnc4=false
+skiplinks=false
+skipcompression=false
+verbose=true
+semiverbose=false
+preserve=true
+debug=false
+sim=false
+printonly=false
+
+unpackifpacked=false
+packonly=false
+pack=false
+packpolicy=all_new
+carefulpacking=true
+skippacking=false
+adjust_fill=true
+newfillvalue=-32767
+variables_pack_input=""
+
+ncfiles=()
+
+function help()
+{
+echo "usage: nc_compress [optional arguments] infiles
+
+Compress (deflate) and pack netCDF files and convert netCDF3 files to netCDF4 format.
+
+optional arguments:
+  -h, --help                Show this help message and exit.
+  --info, --inquire         Only print file information, no not modify files.
+  -d DL, --deflatelevel DL  Set the HDF5/netCDF4 deflate level to DL [0-9]
+                            (default: $deflatelevel).
+  -n, --noshuffle           Do not use shuffling in HDF5/netCDF4 compression.
+  -3, --skipnc4             Skip all netCDF4 files, only apply conversion/
+                            compression to netCDF3 files.
+  -p, --pack                Pack files (using ncpdq) after compression.
+                            nc_compress does not pack variables deemed unsafe for
+                            packing (0,1 and 2-dimensional) variables.
+                            To force
+                            Packing is not lossless and information loss can occur.
+                            Do not apply packing to files without testing its 
+                            effects first. 
+  --var, --packvariables var1[,var2[...]] Comma-separated list of variables to pack
+                            (default: automatically selected).
+  -P, --packonly            Do not apply compression but pack files (using ncpdq).
+  --forcepacking            Pack variables otherwise deemed unsafe for packing (this 
+                            is not recommended). 
+  -u, --unpackifpacked      Unpack packed files before compression (only active
+                            if compression is applied, not active for --packonly).
+                            Note that a file will be re-packed if unpacking occurs,
+                            even if --pack is not active.
+                            Compression of packed files may lead to errors.
+  --skipcompression         Skip compression for files that contain variables which 
+                            are already compressed (packing is still applied if 
+                            --pack or --packonly are active).
+  --skippacking             Skip packing for files that contain variables which 
+                            are already packed (only active if packing is activated
+                            via --pack or --packonly).
+  -a, --archive             Shorthand for 
+                            \"--skipcompression --pack --unpackifpacked --skippacking\"
+                            (options may be subject to change in future versions).
+  -A, --archive-slow        Shorthand for 
+                            \"--pack --unpackifpacked\"
+                            (options may be subject to change in future versions).
+  --pp PP, --packpolicy PP  Set packing policy for packing to PP 
+                            (default: \"$packpolicy\", see ncpdq help for information).
+  -f, --preservefillvalue   Before packing, do NOT set the _FillValue of variables
+                            to value within packed range (currently $newfillvalue)
+                            (only active if packing is activated via --pack or 
+                            --packonly).
+  --nice NL, --nicelevel NL Set the UNIX nice level to NL [0-19] (default: $nicelevel). 
+  -q, --quiet               Create less printed output. 
+  -q2, --pc, --printchanges Print no output for files that are not being changed. 
+  --nopreserve              Do not preserve file attributes of original files.
+  -i, --inflate             Shorthand for \"--deflatelevel 0 --noshuffle\".
+  -l, --skiplinks           Skip files that are links.
+  -s, --sim                 Perform a dry run: only create printed output but do not 
+                            modify files.
+  -v, --version             Print \"version $VERSION\" and exit.
+  --debug                   Switch on debug mode which will print more output
+                            to standard out.
+"
+}
+
+while :
+do
+    case $1 in
+        -h | --help | -\?)
+            help
+            exit 0      
+            ;;
+        -v | --version)
+            echo "version $VERSION"
+            exit 0
+            ;;
+        --info | --inquire)
+            printonly=true
+            shift
+            ;;
+        -d | --deflate | --deflatelevel)
+            deflatelevel=$2
+            shift 2
+            ;;
+        -i | --inflate)
+            deflatelevel=0
+            shuffle=false
+            shift
+            ;;
+        -p | --pack)
+            pack=true
+            shift
+            ;;
+        -P | --packonly)
+            pack=true
+            packonly=true
+            shift
+            ;;
+        --forcepacking)
+            carefulpacking=false
+            shift
+            ;;
+        -f | --preservefillvalue)
+            adjust_fill=true
+            shift
+            ;;
+        --var | --variables | --packvariables)
+            pack=true
+            variables_pack_input=$2
+            shift 2
+            ;;
+        --pp | --packpolicy)
+            packpolicy=$2
+            shift 2
+            ;;
+        -a | --archive)
+            unpackifpacked=true
+            pack=true
+            skipcompression=true
+            skippacking=true
+            shift
+            ;;
+        -A | --archive-slow)
+            unpackifpacked=true
+            pack=true
+            shift
+            ;;
+        -u | --unpackifpacked)
+            unpackifpacked=true
+            shift
+            ;;
+        --nice | --nicelevel)
+            nicelevel=$2
+            shift 2
+            ;;
+        --nopreserve)
+            preserve=false
+            shift
+            ;;
+        -n | --noshuffle)
+            shuffle=false
+            shift
+            ;;
+        -q | --quiet)
+            verbose=false
+            semiverbose=false
+            shift
+            ;;
+        -q2 | --q2 | --pc | --printchanges)
+            verbose=false
+            semiverbose=true
+            shift
+            ;;
+        -3 | --nc3 | --skipnc4)
+            skipnc4=true
+            shift
+            ;;
+        --skipcompression)
+            skipcompression=true
+            shift
+            ;;
+        --skippacking)
+            skippacking=true
+            shift
+            ;;
+        -l | --skiplinks)
+            skiplinks=true
+            shift
+            ;;
+        -s | --sim | --dryrun)
+            sim=true
+            shift
+            ;;
+        --debug)
+            debug=true
+            shift
+            ;;
+        --) # End of all options
+            shift
+            break
+            ;;
+        -*)
+            echo "$(tput setaf 1)ERROR -- Unknown option: $1$(tput sgr0)" >&2
+            help
+            exit 1
+            shift
+            ;;
+        *)  # netcdf files 
+            if [[ -z "$1" ]]; then
+                break
+            else
+                ncfiles=( ${ncfiles[@]} $1 )
+                shift
+            fi
+            ;;
+    esac
+done
+
+nccopy_args="-k netCDF-4 -d $deflatelevel"
+if $shuffle; then
+    nccopy_args="$nccopy_args -s"
+fi
+
+if $debug; then
+    echo "deflatelevel: $deflatelevel"
+    echo "nicelevel:    $nicelevel"
+    echo "shuffle: $shuffle"
+    echo "skipnc4: $skipnc4"
+    echo "verbose: $verbose"
+    echo "ncfiles: ${ncfiles[@]}"
+    echo "nccopy_args: \"$nccopy_args\""
+fi
+
+if [[ ! $deflatelevel =~ ^[0-9]$ ]]; then
+    echo "ERROR -- Invalid deflate level \"$deflatelevel\"." >&2
+    exit 1
+fi
+
+deflatingorinflating=deflating
+[[ $deflatelevel == 0 ]] && deflatingorinflating=inflating
+
+if $verbose; then
+    echo "nc_compress (pid: $$)"
+fi
+
+for nc in ${ncfiles[@]}; do
+    if [[ ! -f "$nc" ]]; then
+        if $verbose; then
+            echo " ! \"$nc\" is not a regular file -- skipping"
+        fi
+        continue
+    fi
+    if [[ $skiplinks == true ]] && [[ -L "$nc" ]]; then
+        if $verbose; then
+            echo " ! \"$nc\" is a link -- skipping"
+        fi
+        continue
+    fi
+    format="$(ncdump -k "$nc" 2> /dev/null )"
+    if [[ "$?" -ne "0" ]]; then
+        if $verbose; then
+            echo " ! \"$nc\" is not a netCDF file -- skipping"
+        fi
+        continue
+    fi
+    if [[ -z "$format" ]]; then
+        if $verbose; then
+            echo " ! cannot determine file type of \"$nc\" -- skipping"
+        fi
+        continue
+    fi
+    if $skipnc4; then
+        if [[ "$format" =~ netCDF-4 ]]; then
+            if $verbose; then
+                echo " ! \"$nc\" is already in netCDF-4 format ("$format")"
+            fi
+            continue
+        fi
+    fi
+    if $printonly; then
+        echo "\"$nc\" (format: \"$format\")"
+    elif $verbose; then
+        echo " - processing \"$nc\" (format: \"$format\")"
+    fi
+    num_packed=$(ncdump -h "$nc" | sed -r -n "s/^\s*[^ ]+:add_offset *= */&/p" | wc -l )
+    num_deflated=$(ncdump -s -h "$nc" | sed -r -n "s/^\s*[^ ]+:_DeflateLevel *= *[1-9]/&/p" | wc -l )
+    
+    if [[ $printonly == true ]]; then
+        if [[ $num_deflated -gt 0 ]] ; then
+            echo "   file is compressed (found $num_deflated variables with deflate level > 0)"
+        else
+            echo "   file is not compressed (found no variables with deflate level > 0)"
+        fi
+        if [[ $num_packed -gt 0 ]] ; then
+            echo "   file is packed (found $num_packed packed variables)"
+        else
+            echo "   file is not packed (found no packed variables)"
+        fi
+        continue
+    elif $verbose; then
+        [[ $num_deflated -gt 0 ]] && echo "   found $num_deflated compressed variables"
+        [[ $num_packed -gt 0 ]] && echo "   found $num_packed packed variables"
+    fi
+
+    nc_tmp="${nc}.nc_compress.tmp"
+    if [[ -f "$nc_tmp" ]]; then
+        counter=1
+        while [[ -f "$nc_tmp" ]]; do
+            ((counter+=1))
+            nc_tmp="${nc}.nc_compress${counter}.tmp"
+        done
+    fi
+    nc_tmp2="${nc_tmp//.tmp/.a.tmp}"
+    if [[ -f "$nc_tmp2" ]]; then
+        counter=1
+        while [[ -f "$nc_tmp" ]]; do
+            ((counter+=1))
+            nc_tmp2="${nc_tmp//.tmp/.$(tr 123456789 abcdefghij <<< $counter).tmp}"
+        done
+    fi
+    
+    perform_nccopy=true
+    # do not nccopy if --packonly is active
+    [[ $packonly == true ]] && perform_nccopy=false
+    # do not compress if --skipcompression is active and there are compressed variables 
+    [[ $skipcompression == true ]] && [[ $num_deflated -gt 0 ]] && perform_nccopy=false
+    perform_pack=$pack
+    # do not pack if --skippacking is active and there are packed variables
+    [[ $skippacking == true ]] && [[ $num_packed -gt 0 ]] && perform_pack=false
+    perform_unpack=false
+    # perform unpacking if nccopy is performed, there are packed variables, and --unpackifpacked is active
+    [[ $perform_nccopy == true ]] && [[ $num_packed -gt 0 ]] && [[ $unpackifpacked == true ]] && perform_unpack=true
+    # reactivate packing if unpacking is done
+    [[ $perform_unpack == true ]] && perform_pack=true
+
+    #if [[ $carefulpacking == true ]] && [[ $perform_pack == true ]]; then
+    #    
+    #    [[ $perform_pack == true ]] && [[ -n "$(ncdump -h -v obs_scale "$nc" 2> /dev/null)" ]] && perform_pack=false
+    #    [[ $perform_pack == true ]] && [[ -n "$(ncdump -h -v obs_value "$nc" 2> /dev/null)" ]] && perform_pack=false
+    #   
+    #    if [[ $perform_pack == false ]] && [[ $verbose == true ]]; then
+    #        echo " ! careful packing option (-c/--carefulpacking) prevented file from being packed, turn off to force packing" 
+    #    fi
+    #fi
+
+    if $debug; then
+        echo "   temporary file names:
+      \"$nc_tmp\"
+      \"$nc_tmp2\"
+   
+   perform_nccopy=$perform_nccopy
+   perform_unpack=$perform_unpack
+   perform_pack=$perform_pack"
+    fi
+   
+    if [[ $perform_nccopy == false ]] && [[ $perform_pack == false ]]; then
+        if $verbose; then
+            echo "   not performing compression or packing -- skipping"
+        fi
+        continue
+    fi
+    if $semiverbose; then
+        echo " - processing \"$nc\" (format: \"$format\")"
+        [[ $num_deflated -gt 0 ]] && echo "   found $num_deflated compressed variables"
+        [[ $num_packed -gt 0 ]] && echo "   found $num_packed packed variables"
+    fi
+
+    size_old="$(wc -c < "$nc")"
+    sour="$nc"
+    dest="$nc_tmp"
+    step=1
+    if $perform_unpack; then
+        if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
+            echo "   ($step) unpacking file"
+            ((step++))
+        fi
+        if [[ $sim == false ]]; then
+            nice -n $nicelevel ncpdq --unpack "$sour" "$dest"
+            if [[ "$?" -ne "0" ]]; then
+                echo "ERROR -- something went wrong during ncpdq operation." >&2
+                rm -f "$nc_tmp" "$nc_tmp2"
+                exit 1
+            fi
+        fi
+        sour="$dest"
+        dest="$nc_tmp"
+        [[ $sour == $dest ]] && dest="$nc_tmp2"
+    fi
+    if $perform_nccopy; then
+        if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
+            echo "   ($step) $deflatingorinflating file"
+            ((step++))
+        fi
+        if [[ $sim == false ]]; then
+            nice -n $nicelevel nccopy $nccopy_args "$sour" "$dest"
+            if [[ "$?" -ne "0" ]]; then
+                echo "ERROR -- something went wrong during nccopy operation." >&2
+                rm -f "$nc_tmp" "$nc_tmp2"
+                exit 1
+            fi
+        fi
+        sour="$dest"
+        dest="$nc_tmp"
+        [[ $sour == $dest ]] && dest="$nc_tmp2"
+    fi
+    if $perform_pack; then
+        if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
+            echo "   ($step) packing file"
+            ((step++))
+        fi
+        if [[ $sim == false ]]; then
+            if [[ -n "$variables_pack_input" ]] || [[ $carefulpacking == true ]]; then
+                if [[ -n "$variables_pack_input" ]]; then
+                    num_input=$(tr -dc ',' <<< "$variables_pack_input" | wc -c)
+                    # num_input = number of commas + 1
+                    ((num_input++))
+                    if [[ $carefulpacking == true ]]; then
+                        # find all variables in variables_pack that are also in file and at least 3-dimensional
+                        #                                          the {2,} counts the number of commas (number of dimensions - 1)  ----------v
+                        variables_pack=$(ncdump -h "$sour" | sed -n -r "s/^\s*[a-z]+ +($(tr ',' '|' <<< "$variables_pack_input")) *\(([^,]+,){2,}[^,]+\) *;.*/\1/p" | tr '\n' ',')
+                    else
+                        # find all variables in variables_pack that are also in file
+                        variables_pack=$(ncdump -h "$sour" | sed -n -r "s/^\s*[a-z]+ +($(tr ',' '|' <<< "$variables_pack_input")) *(\(.*\))? *;.*/\1/p" | tr '\n' ',')
+                    fi
+                else
+                    # only pack variables with 3 or more dimensions
+                    #     the {2,} counts the number of commas (number of dimensions - 1)  ----------v
+                    variables_pack="$(ncdump -h "$sour" | sed -n -r "s/^\s*[a-z]+ +(\w+) *\(([^,]+,){2,}[^,]+\) *;.*/\1/p" | tr '\n' ',' )"
+                fi
+                num_pack=$(tr -dc ',' <<< "$variables_pack" | wc -c)
+                # remove trailing comma
+                variables_pack="${variables_pack%,}"
+                if [[ $num_pack == 0 ]]; then
+                    if [[ $verbose == true ]]; then
+                        if [[ $carefulpacking == true ]]; then
+                            echo "    ! no suitable variables found for packing (0, 1 or 2-dimensional variables are not packed)" 
+                        else
+                            echo "    ! no suitable variables found for packing (selected variables are not present in file)" 
+                        fi
+                    fi
+                    dest="$sour"
+                else
+                    if [[ $verbose == true ]]; then
+                        if [[ -n "$variables_pack_input" ]]; then
+                            echo "      packing $num_pack/$num_input selected variable(s)" 
+                        else
+                            echo "      packing $num_pack variable(s)" 
+                        fi
+                    fi
+                    if $adjust_fill; then
+                        # look for variables with fill value among those in variables_pack
+                        ncatted_args="$(ncdump -h "$sour" | sed -n -r "s/^\s*($(tr ',' '|' <<< "$variables_pack")):_FillValue .*/-a _FillValue,\1,o,f,${newfillvalue}/p" | tr '\n' ' ')"
+                        if [[ -n "$ncatted_args" ]]; then 
+                            nice -n $nicelevel ncatted $ncatted_args "$sour"
+                            if [[ "$?" -ne "0" ]]; then
+                                echo "ERROR -- something went wrong during ncatted operation." >&2
+                                if $debug; then
+                                    echo "ncatted_args=\"$ncatted_args\""
+                                fi
+                                rm -f "$nc_tmp" "$nc_tmp2"
+                                exit 1
+                            fi
+                        fi
+                    fi
+                    if $debug; then
+                        echo "packing the variables: \"$variables_pack\""
+                    fi
+                    nice -n $nicelevel ncpdq -C -O -v "$variables_pack" "$sour" "$dest"
+                    if [[ "$?" -ne "0" ]]; then
+                        echo "ERROR -- something went wrong during ncpdq operation." >&2
+                        rm -f "$nc_tmp" "$nc_tmp2"
+                        exit 1
+                    fi
+                    if $debug; then
+                        echo "appending remaining variables"
+                    fi
+                    nice -n $nicelevel ncks -C -A -x -v "$variables_pack" "$sour" "$dest"
+                    if [[ "$?" -ne "0" ]]; then
+                        echo "ERROR -- something went wrong during ncks operation." >&2
+                        rm -f "$nc_tmp" "$nc_tmp2"
+                        exit 1
+                    fi
+                fi
+            else
+                if $adjust_fill; then
+                    ncatted_args="$(ncdump -h "$sour" | sed -n -r "s/^\s*([^:]+):_FillValue .*/-a _FillValue,\1,o,f,${newfillvalue}/p" | tr '\n' ' ')"
+                    [[ -n "$ncatted_args" ]] && nice -n $nicelevel ncatted $ncatted_args "$sour"
+                fi
+                nice -n $nicelevel ncpdq -O -P "$packpolicy" "$sour" "$dest"
+            fi
+            if [[ "$?" -ne "0" ]]; then
+                echo "ERROR -- something went wrong during ncpdq operation." >&2
+                rm -f "$nc_tmp" "$nc_tmp2"
+                exit 1
+            fi
+        fi
+        sour="$dest"
+    fi
+    if [[ $sim == false ]]; then
+        # "sour" now contains the final product
+        # if $sour == $nc , no changes were made
+        if [[ $sour != $nc ]]; then
+            if $preserve; then
+                touch -r "$nc" "$sour"
+            fi
+            mv "$sour" "$nc"
+        fi
+        rm -f "$nc_tmp" "$nc_tmp2"
+        if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
+            size_new="$(wc -c < "$nc")"
+            printf "   created a %2.1f%% reduction in file size (%d -> %d)\n" "$(bc -l <<< "100*(1-$size_new/$size_old)")" "$size_old" "$size_new"
+        fi
+    else
+        echo "   file was not changed -- simulation only"
+    fi
+done
+

@@ -1,23 +1,23 @@
 #!/bin/bash
 
 if [[ $# != 2 ]]; then
-    echo "ERROR -- Two input arguments required." >&2
+    echo "ERROR – Two input arguments required." >&2
     exit 1
 fi
 
 if [[ ! -e "$1" ]]; then
-    echo "ERROR -- File \"$1\" does not exist." >&2
+    echo "ERROR – File \"$1\" does not exist." >&2
     exit 1
 fi
 if [[ ! -f "$1" ]]; then
-    echo "ERROR -- \"$1\" is not a regular file." >&2
+    echo "ERROR – \"$1\" is not a regular file." >&2
     exit 1
 fi
 
 res="$(sed -n "s/^\ *$2\ *=\{1,2\}\ *\([^!]*[^! ]\).*/\1/p" < "$1")"
 
 if [[ -z "$res" ]]; then
-    echo "ERROR -- Variable \"$2\" does not exist." >&2
+    echo "ERROR – Variable \"$2\" does not exist." >&2
     exit 1
 fi
 

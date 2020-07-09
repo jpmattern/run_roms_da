@@ -1,0 +1,7 @@
+#!/bin/bash
+
+#
+#SBATCH --ntasks-per-node=20         # Defines the number of MPI ranks per node. 
+
+mpirun ${ROMS_EXECUTABLE} ${ROMS_INFILE}
+

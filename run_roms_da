@@ -1,23 +1,15 @@
 #!/bin/bash
 ########################################################################
 #                                                                      #
-#  This script is used to run ROMS 4DVar data assimilation            #
+#  This script is used to run ROMS 4DVar data assimilation             #
 #                                                                      #
 ########################################################################
 #                                                                      #
-#  Written by Paul Mattern                                             #
-#  - previously called submit_da_script.bash                           #
-#  - not constrained to incremental 4DVar                              #
-#  - made more modular: configuration file + this executable           #
-#  - added log file output for this script                             #
-#  - use of rif_setvar                                                 #
-#  - added timing of each cycle                                        #
-#  - restart option (--restart / -r)                                   #
-#  - other command line options                                        #
+#  written by Jann Paul Mattern                                        #
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.2
+VERSION=0.9.6
 
 ########################################################################
 #
@@ -27,7 +19,11 @@ VERSION=0.9.2
 #           submit_da_script.bash
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
-# TODO: add nc_compress
+# 0.9.3     added error message when failing to read configuration
+# 0.9.4     improved restart behavior and reading of log-file
+# 0.9.5     support for new ROMS output file format "outer0" and old
+#           "000"
+# 0.9.6     exit with error if setting of in-file variables fails
 ########################################################################
 
 ########################################################################
@@ -49,6 +45,11 @@ optional arguments:
                         the last started cycle failed. Extending a run may 
                         require to extend the \"stop_day\" variable in the
                         configuration file).
+  -t, --test            Combine with the -r/--restart or -e/--extend option
+                        to examine the restart cycle and day without 
+                        actually performing a restart or writing any files.
+                        Using this option by iself automatically invokes
+                        the -r/--restart option.
   -f, --force           Forces clean start, may overwrite previous results. 
   -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
                         Use the configuration file CONFIGFILE instead of the 
@@ -67,7 +68,7 @@ optional arguments:
 function raise_error()
 {
 #tput setaf 1
-echo "ERROR -- $1" >&2
+echo "ERROR – $1" >&2
 #tput sgr0
 exit 1
 }
@@ -149,7 +150,7 @@ while [[ -n "$1" ]]; do
             break
             ;;
         *)
-            echo "$(tput setaf 1)ERROR -- Unknown option: \"$1\"$(tput sgr0)" >&2
+            echo "$(tput setaf 1)ERROR – Unknown option: \"$1\"$(tput sgr0)" >&2
             help
             exit 1
             ;;
@@ -184,7 +185,7 @@ fi
 
 # add directory with utility scripts to PATH and check if all required commands are available
 export PATH="${script_dir}:${script_dir}/util:${PATH}"
-for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice ; do 
+for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice nc_compress ; do 
     command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
 done
 
@@ -200,6 +201,25 @@ fi
 ########################################################################
 
 source "$configfile"
+if [[ "$?" -ne "0" ]]; then
+    echo "An error occured while reading the configuration file.
+Ensure that it is a valid bash script; common problems include: 
+(1) Invalid use of spaces in variable declarations, it must be
+    cycle_length=4
+and not
+    cycle_length = 4
+(2) Invalid use of spaces for variable values. If spaces are used, 
+in a variable value, they must be contained in '\"', for example
+    title=\"4DVar experiment\"
+and not 
+    title=4DVar experiment
+(3) Invalid characters/syntax error in paramchanges_ocean. If the ROMS
+variable name contain special characters, it is best to include the name 
+in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
+    paramchanges_ocean=( \"Hout(idUvel)\"=T )
+" >&2
+    raise_error "Failed reading the configuration file \"$configfile\"."
+fi
 
 if $debug; then
     echo "debug: finished sourcing configuration file"
@@ -366,7 +386,7 @@ if [[ -z "$breakfilename" ]]; then
     breakfilename=".stop_run_roms_da"
 fi
 if [[ -f "$main_dir/$breakfilename" ]]; then
-    echo "WARNING -- break file present, this will lead to termination after the next cycle if it is not removed."
+    echo "WARNING – break file present, this will lead to termination after the next cycle if it is not removed."
 fi
 
 if [[ -z "$breakfile_remove" ]]; then
@@ -415,7 +435,7 @@ if [[ $roms_startmode == auto ]]; then
     echo "   switching from ROMS startmode \"auto\" to \"$roms_startmode\"."
 elif [[ -n "$machines_input" ]]; then
     if [[ $roms_startmode != mpirun* ]]; then
-        echo "WARNING -- ROMS startmode \"$roms_startmode\" does not support specification of machines using --machines (-m)."
+        echo "WARNING – ROMS startmode \"$roms_startmode\" does not support specification of machines using --machines (-m)."
     elif [[ $roms_startmode != mpirun-machines ]]; then
         echo "   switching from ROMS startmode \"$roms_startmode\" to \"mpirun-machines\""
         roms_startmode=mpirun-machines
@@ -476,7 +496,7 @@ fi
 if [[ "$perform_restart" == false ]] && [[ "$force_freshstart" == false ]]; then
     logfiles=( $storage_dir/${roms_logfile_mask//%d/*} )
     if [[ -d $storage_dir ]] && [[ -f ${logfiles[0]} ]]; then
-        echo "Old log files found -- Are you sure you want to continue and possibly erase old files?"
+        echo "Old log files found – Are you sure you want to continue and possibly erase old files?"
         select res in "Continue as is and possibly erase old files (equivalent to --force option)." "Attempt a restart from existing files (equivalent to --restart option)." "Abort."; do
             case $REPLY in
                 1 ) break ;;
@@ -749,35 +769,36 @@ fi
 cd $main_dir
 
 if $perform_restart; then
-    logfiles=(${roms_logfile_mask//%d/*})
-    if [[ ${#logfiles[@]} > 1 ]]; then
-        echo "WARNING -- Found more than one log file, using last." >&2
-    elif [[ ${#logfiles[@]} == 0 ]]; then
-        echo "WARNING -- Found 0 log files, searching in storage." >&2
-        logfiles=($storage_dir/${roms_logfile_mask//%d/*})
-        if [[ ${#logfiles[@]} == 0 ]]; then
-            raise_error "Found no log files in base directory or storage."
-        fi
-    fi
     # look for "restart at X:Y" first where X=cycle Y=day (must be the last entry behind "starting data assimilation cycle")
     # use day to temporarily hold whole string
     day=$(egrep '(starting data assimilation cycle|restart at)' "$run_roms_logfile" | tail -n 1 | grep 'restart at')
     if [[ -n "$day" ]]; then
         day="$(sed -n "s/.*restart  *at  *\([0-9]\{1,\}\):\([0-9]\{1,\}\).*/\1:\2/p" <<< "$day")"
-        echo "restart: using restart information in DA log file: \"$day\""
+        echo "restart: using restart information in run_roms_da log file: \"$day\""
         cycle=${day%:*}
         day=${day#*:}
     else
-        day=$(echo ${logfiles[$((${#logfiles[@]}-1))]} | sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p")
-        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running $da_name algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
+        logfiles=($main_dir/${roms_logfile_mask//%d/*})
+        if [[ ${#logfiles[@]} > 1 ]]; then
+            echo "WARNING – Found more than one log file in \"$main_dir\", using last." >&2
+        elif [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
+            echo "restart: Found 0 log files in \"$main_dir\", searching in storage." >&2
+            logfiles=($storage_dir/${roms_logfile_mask//%d/*})
+            if [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
+                raise_error "Found no log files in base directory or storage."
+            fi
+        fi
+        logfile="${logfiles[$((${#logfiles[@]}-1))]}"
+        day=$(sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p" <<< "$logfile")
+        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running .* algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
         if [[ -z "$day" ]]; then
-            echo "WARNING -- Cannot find day in ROMS log file, using day from DA log." >&2
+            echo "WARNING – Cannot find day in ROMS log file, using day from run_roms_da log." >&2
             day="$day_log"
             if [[ -z "$day" ]]; then
-                raise_error "Cannot find day in DA log file."
+                raise_error "Cannot find day in run_roms_da log file."
             fi
         elif [[ "$day" -ne "$day_log" ]]; then
-            raise_error "Day in ROMS log file ($day) does not agree with day in DA log ($day_log). Are multiple ROMS log-files present?"
+            raise_error "Day in ROMS log file ($day) does not agree with day in run_roms_da log ($day_log). Are multiple ROMS log-files present?"
         fi
         cycle=$(tail -n 1000 "$run_roms_logfile" | tac | sed -n "1,/^ • starting data assimilation/ s/^ • starting data assimilation cycle: *\([0-9]\{1,\}\).*/\1/p")
         if [[ -z "$cycle" ]]; then
@@ -786,16 +807,16 @@ if $perform_restart; then
         unset day_log
     fi
     if $perform_restart_extend; then
-        echo "restart: identified cycle $cycle (day $day) as the last finished cycle, extending run"
+        echo "restart: Identified cycle $cycle (day $day) as the last finished cycle, extending run."
         ((day+=cycle_length))
         ((cycle++))
         echo "restart: extending run starting at current cycle $cycle (day $day)"
     else
-        echo "restart: identified cycle $cycle as the current cycle, day $day as the current day, attempting restart"
+        echo "restart: Identified cycle $cycle as the current cycle, day $day as the current day, attempting restart."
     fi
 
     if $perform_test; then
-        echo "TEST MODE == QUITTING"
+        echo "test mode (-t/--test) – quitting"
         exit 0
     fi
 fi
@@ -838,7 +859,7 @@ while [[ $day -lt $stop_day ]]; do
     echo " • starting data assimilation cycle: $cycle ($cycle_date, day $day)"
 
     # %-m returns month without any leading zeros
-    cur_month=$(date --date=@$day_unix +"%-m")
+    cur_month=$(date -u --date=@$day_unix +"%-m")
     if $debug; then
         echo "debug: current month=$cur_month"
     fi
@@ -1058,7 +1079,7 @@ while [[ $day -lt $stop_day ]]; do
             if [[ $cycle == 1 ]] || $debug; then
                 printf "   %s = %s\n" "$name" "$value"
             fi
-            rif_setvar "$ocean_in_local" "$name" "$value" || echo " ! Error setting variable"
+            rif_setvar "$ocean_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"."
         done
     elif [[ $cycle == 1 ]] || $debug; then
         echo " • no parameter changes to \"$(basename $ocean_in_local)\""
@@ -1157,7 +1178,7 @@ while [[ $day -lt $stop_day ]]; do
                 if [[ $cycle == 1 ]] || $debug; then
                     printf "   %s = %s\n" "$name" "$value"
                 fi
-                rif_setvar "$da_in_local" "$name" "$value" || echo " ! Error setting variable"
+                rif_setvar "$da_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"." 
             done
         #elif [[ $cycle == 1 ]] || $debug; then
         #    echo " • no parameter changes to \"$(basename $da_in_local)\""
@@ -1339,7 +1360,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
                     numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
                 done
             fi
-            echo "   found ${machines_numidle} idle machines -- proceeding"
+            echo "   found ${machines_numidle} idle machines – proceeding"
         fi
         echo "   submitting job with name \"$sbatch_name\""
         if $use_sbatch_donefile ; then
@@ -1443,7 +1464,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
             fi
         fi
 
-        printf "%s -- ROMS %s (cycle: %d, outer loop: %s, inner loop: %s, stage: %s)%s\n" "$error_prefix" "$error_desc" $cycle $(roms4dvarprogress $log_file) "$error_suffix" >&2
+        printf "%s – ROMS %s (cycle: %d, outer loop: %s, inner loop: %s, stage: %s)%s\n" "$error_prefix" "$error_desc" $cycle $(roms4dvarprogress $log_file) "$error_suffix" >&2
         [[ $error_prefix == *ERROR* ]] && exit 1
         if [[ $repeat_cycle == true ]]; then
             if $debug; then
@@ -1458,8 +1479,10 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         check_lastfwd=false
     fi
     if [[ $check_lastfwd == true ]]; then
-        if [[ ! -f "$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" ]]; then
-            raise_error "Cannot find last forward file \"$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )\" (cycle $cycle)."
+        lastfwd1="$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" 
+        lastfwd2="$(printf "%s_outer%d.nc" ${FWDname%.nc} $Nouter )" 
+        if [[ ! -f "$lastfwd1" ]] && [[ ! -f "$lastfwd2" ]]; then
+            raise_error "Cannot find last forward file \"${lastfwd1}\" or \"${lastfwd2}\" (cycle $cycle)."
         fi
     fi
 
@@ -1472,11 +1495,13 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     ini_file_local_new="$storage_dir/${file_prefix}_ini_$(($day+cycle_length)).nc"
 
     if [[ $ini_filetype == rst ]]; then
+        echo " • using RST file to generate initial conditions"
         ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == dai ]]; then
         echo " • using DAI file to generate initial conditions"
         cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new" 
     elif [[ $ini_filetype == fwd ]]; then
+        echo " • using FWD file to generate initial conditions"
         # outdated option but still supported
         if [[ -z "$cycle_transition_script" ]]; then
             cycle_transition_script=findsmallestJ.py
@@ -1625,7 +1650,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     #---------------------------------------------------------------------
 
     if [[ -f "$breakfilename" ]]; then
-        echo " • found break file (\"$breakfilename\") -- removing file and terminating."
+        echo " • found break file (\"$breakfilename\") – removing file and terminating."
         echo "   restart at ${cycle}:${day}"
 
         if $breakfile_remove; then
