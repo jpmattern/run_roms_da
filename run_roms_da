@@ -1511,7 +1511,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         if [[ "$cycle_transition_mode" == 1 ]]; then
             cycle_transition_args="--mode 1 --offset_sec $cycle_transition_offset_sec --movebestto $storage_dir"
         fi
-        if $cycle_transition_write_NLmodel_value; then
+        if [[ -n "$cycle_transition_write_NLmodel_value" ]] && [[ $cycle_transition_write_NLmodel_value == true ]]; then
             cycle_transition_args="$cycle_transition_args --write_NLmodel_value"
         fi
         if [[ $proceed_on_fatal_algorithm_result == true ]]; then
