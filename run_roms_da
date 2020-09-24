@@ -1636,13 +1636,13 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         if [[ $adaptive_dt_index != -1 ]]; then
             adaptive_dt_index=-1
             dt=$dt_orig
-            echo "adaptive_dt: ROMS finished successfully, resetting dt to $dt."
+            echo " • adaptive_dt: ROMS finished successfully, resetting dt to $dt."
         fi
     fi
     # if adaptive_paramchanges is active, reset
     if [[ $adaptive_paramchanges == true ]] && [[ $adaptive_paramchanges_active == true ]]; then
         adaptive_paramchanges_active=false
-        echo "adaptive_paramchanges: ROMS finished successfully, resetting parameter values"
+        echo " • adaptive_paramchanges: ROMS finished successfully, resetting parameter values"
     fi
 
     #---------------------------------------------------------------------
