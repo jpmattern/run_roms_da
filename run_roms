@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.8.2
+VERSION=0.8.3
 
 ########################################################################
 #
@@ -18,6 +18,7 @@ VERSION=0.8.2
 # 0.8    first github version
 # 0.8.1  adding util subdirectory to PATH, using nc_obsslice 
 # 0.8.2  exit with error if setting of in-file variables fails 
+# 0.8.3  added sbatch_args
 ########################################################################
 
 ########################################################################
@@ -450,7 +451,8 @@ elif [[ $roms_startmode == sbatch* ]]; then
     
     # if ntasks-per-node is set, use np (ntasks) to set nodes
     ntasks_per_node=$(sed -n "s/^#SBATCH  *--ntasks-per-node= *\([0-9][0-9]*\) .*/\1/p" < "$sbatchfile")
-    sbatchargs="$slurmargs"
+    # accept possible user input sbatch_args
+    sbatch_args="$sbatch_args $slurmargs"
     if [[ -n "$ntasks_per_node" ]] ; then
         nodes=1
         while [[ $((np > nodes*ntasks_per_node)) == 1 ]]; do
@@ -459,12 +461,12 @@ elif [[ $roms_startmode == sbatch* ]]; then
         if [[ $nodes -ne $nodes_old ]]; then
             echo "   adjusting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${np})" 
         fi
-        sbatchargs="$sbatchargs --nodes=$nodes"
+        sbatch_args="$sbatch_args --nodes=$nodes"
     fi
     # remove log file if it is present
     [[ -f "$logfile" ]] && rm -f "$logfile"
     echo "   submitting job with name \"$sbatchname\""
-    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatchargs --output="$logfile" "$sbatchfile")"
+    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatch_args --output="$logfile" "$sbatchfile")"
     echo "   $tmp"
     # tmp is something like "Submitted batch job 15211"
     if [[ $roms_startmode == sbatch-wait ]]; then
