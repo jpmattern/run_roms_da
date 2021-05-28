@@ -9,13 +9,13 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.6
+VERSION=0.9.7
 
 ########################################################################
 #
 # VERSION history/notes
 #
-# 0.9.0     first version, branched off version 1.9.1 of 
+# 0.9.0     first version, branched off version 1.9.1 of
 #           submit_da_script.bash
 # 0.9.1     added -e/--extend option
 # 0.9.2     adding util subdirectory to PATH
@@ -24,6 +24,7 @@ VERSION=0.9.6
 # 0.9.5     support for new ROMS output file format "outer0" and old
 #           "000"
 # 0.9.6     exit with error if setting of in-file variables fails
+# 0.9.7     added -b/--sbatchargs option
 ########################################################################
 
 ########################################################################
@@ -38,27 +39,29 @@ Start ROMS 4DVar data assimilation cycles.
 
 optional arguments:
   -h, --help            Show this help message and exit.
-  -r, --restart         Attempt to restart a previously failed run. 
-  -e, --extend          Attempt to restart a previously completed run and 
+  -r, --restart         Attempt to restart a previously failed run.
+  -e, --extend          Attempt to restart a previously completed run and
                         extend it beyond its previous date range.
-                        (Like the -r/--restart option but does not assume 
-                        the last started cycle failed. Extending a run may 
+                        (Like the -r/--restart option but does not assume
+                        the last started cycle failed. Extending a run may
                         require to extend the \"stop_day\" variable in the
                         configuration file).
   -t, --test            Combine with the -r/--restart or -e/--extend option
-                        to examine the restart cycle and day without 
+                        to examine the restart cycle and day without
                         actually performing a restart or writing any files.
                         Using this option by iself automatically invokes
                         the -r/--restart option.
-  -f, --force           Forces clean start, may overwrite previous results. 
-  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
-                        Use the configuration file CONFIGFILE instead of the 
+  -f, --force           Forces clean start, may overwrite previous results.
+  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE
+                        Use the configuration file CONFIGFILE instead of the
                         default \"run_roms_da.config\".
-  -m MACHINES, --machines MACHINES Allows specifying the machines to run 
-                        ROMS on (still requires valid machine file specified 
+  -m MACHINES, --machines MACHINES Allows specifying the machines to run
+                        ROMS on (still requires valid machine file specified
                         in configuration).
                         MACHINES must be a comma-separated list of machines,
                         e.g. \"node1,node2\"
+  -b --sbatchargs       Arguments to pass on to the sbatch call (only active
+                        if sbatch is used).
   -v, --version         Print \"version $VERSION\" and exit.
   -d, --debug           Switch on debug mode which will print more output
                         to standard out.
@@ -87,6 +90,7 @@ sleep_for=""
 machines_input=""
 report_time=true
 machines_numidle_input=""
+sbatch_args_manual=""
 
 while [[ -n "$1" ]]; do
     case $1 in
@@ -108,6 +112,10 @@ while [[ -n "$1" ]]; do
             ;;
         -c | --configfile)
             configfile=$2
+            shift 2
+            ;;
+        -b | --sbatchargs )
+            sbatch_args_manual="$2"
             shift 2
             ;;
         --configfile=*)
@@ -185,7 +193,7 @@ fi
 
 # add directory with utility scripts to PATH and check if all required commands are available
 export PATH="${script_dir}:${script_dir}/util:${PATH}"
-for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice nc_compress ; do 
+for cmd in ncks ncap2 rif_setvar rif_isvar rif_getvar nc_obsslice nc_compress ; do
     command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
 done
 
@@ -203,18 +211,18 @@ fi
 source "$configfile"
 if [[ "$?" -ne "0" ]]; then
     echo "An error occured while reading the configuration file.
-Ensure that it is a valid bash script; common problems include: 
+Ensure that it is a valid bash script; common problems include:
 (1) Invalid use of spaces in variable declarations, it must be
     cycle_length=4
 and not
     cycle_length = 4
-(2) Invalid use of spaces for variable values. If spaces are used, 
+(2) Invalid use of spaces for variable values. If spaces are used,
 in a variable value, they must be contained in '\"', for example
     title=\"4DVar experiment\"
-and not 
+and not
     title=4DVar experiment
 (3) Invalid characters/syntax error in paramchanges_ocean. If the ROMS
-variable name contain special characters, it is best to include the name 
+variable name contain special characters, it is best to include the name
 in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
     paramchanges_ocean=( \"Hout(idUvel)\"=T )
 " >&2
@@ -369,13 +377,13 @@ if [[ $start_day == *-* ]]; then
     start_day_orig="$start_day"
     start_day=$(sed "s/\.*0*$//" <<< $(bc -l <<< "$(($(date --date="$start_day" +%s -u) - $roms_time_ref_unix))/86400"))
     echo "   converted start_day=\"$start_day_orig\" to $start_day (days since $roms_time_ref)"
-    unset start_day_orig 
+    unset start_day_orig
 fi
 if [[ $stop_day == *-* ]]; then
     stop_day_orig="$stop_day"
     stop_day=$(sed "s/\.*0*$//" <<< $(bc -l <<< "$(($(date --date="$stop_day" +%s -u) - $roms_time_ref_unix))/86400"))
     echo "   converted stop_day=\"$stop_day_orig\" to $stop_day (days since $roms_time_ref)"
-    unset stop_day_orig 
+    unset stop_day_orig
 fi
 
 if [[ -z "$cycle_transition_mode" ]]; then
@@ -526,7 +534,7 @@ if $write_log; then
 fi
 
 # ncks version check
-# newer version of ncks requires --trd to produce same output that older version produces by default 
+# newer version of ncks requires --trd to produce same output that older version produces by default
 # (and older version does not recognize --trd )
 if [[ -z "$(ncks -m -v ocean_time "$ini_file" | sed -n "s/.* ocean_time, size *= *\([0-9][0-9]*\).*/\1/p")" ]]; then
     ncksargs="--trd"
@@ -853,7 +861,7 @@ while [[ $day -lt $stop_day ]]; do
     if $debug; then
         echo "debug: cycle_date=\"$cycle_date\" ($(date --date=@$day_unix -u --iso-8601=seconds))"
     fi
-    
+
     echo ""
     # if this line is changed, remember to adjust restart sed statement above
     echo " • starting data assimilation cycle: $cycle ($cycle_date, day $day)"
@@ -1095,7 +1103,7 @@ while [[ $day -lt $stop_day ]]; do
     if $debug; then
         echo "debug: setting NTIMES=$NTIMES"
     fi
-    
+
 
     if [[ "$ini_filetype" == rst ]]; then
         if [[ $cycle_length_roms == $cycle_length ]]; then
@@ -1178,7 +1186,7 @@ while [[ $day -lt $stop_day ]]; do
                 if [[ $cycle == 1 ]] || $debug; then
                     printf "   %s = %s\n" "$name" "$value"
                 fi
-                rif_setvar "$da_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"." 
+                rif_setvar "$da_in_local" "$name" "$value" || raise_error "Failed to set value for variable \"$name\"."
             done
         #elif [[ $cycle == 1 ]] || $debug; then
         #    echo " • no parameter changes to \"$(basename $da_in_local)\""
@@ -1271,8 +1279,8 @@ while [[ $day -lt $stop_day ]]; do
             done
         fi
     fi
-    
-    # make custom parameter changes 
+
+    # make custom parameter changes
 
     if [[ $adaptive_paramchanges == true ]] && [[ $adaptive_paramchanges_active == true ]]; then
         echo " • parameter adjustments (adaptive_paramchanges):"
@@ -1286,7 +1294,7 @@ while [[ $day -lt $stop_day ]]; do
             fi
             if [[ $class == ocean ]]; then
                 file="$ocean_in_local"
-            elif [[ $class == bio ]]; then 
+            elif [[ $class == bio ]]; then
                 file="$bio_in_local"
             elif [[ $class == da ]]; then
                 file="$da_in_local"
@@ -1336,6 +1344,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         [[ "$sbatch_name" == *%c* ]] && sbatch_name="${sbatch_name//%c/$cycle}"
         # if ntasks-per-node is set, use num_nodes (ntasks) to set nodes
         # try to obtain ntasks-per-node from sbatch_args or else sbatch_file
+        sbatch_args="$sbatch_args_manual $sbatch_args"
         if [[ $sbatch_args == *--ntasks-per-node=* ]]; then
             ntasks_per_node=$(sed -r -n "s/.*--ntasks-per-node=([0-9]+).*/\1/p" <<< "$sbatch_args")
         else
@@ -1347,7 +1356,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
                 ((nodes++))
             done
             if [[ $nodes -ne $nodes_old ]]; then
-                echo "   setting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${num_nodes})" 
+                echo "   setting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${num_nodes})"
             fi
             sbatch_args="$sbatch_args --nodes=$nodes"
         fi
@@ -1355,7 +1364,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
             numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
             if [[ $numidle -lt $machines_numidle ]]; then
                 echo "   hibernating until ${machines_numidle} machines are idle"
-                while [[ $numidle -lt $machines_numidle ]]; do 
+                while [[ $numidle -lt $machines_numidle ]]; do
                     sleep 30s
                     numidle=$(sinfo -o "%A" --noheader | cut -d/ -f2)
                 done
@@ -1479,8 +1488,8 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         check_lastfwd=false
     fi
     if [[ $check_lastfwd == true ]]; then
-        lastfwd1="$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )" 
-        lastfwd2="$(printf "%s_outer%d.nc" ${FWDname%.nc} $Nouter )" 
+        lastfwd1="$(printf "%s_%03d.nc" ${FWDname%.nc} $Nouter )"
+        lastfwd2="$(printf "%s_outer%d.nc" ${FWDname%.nc} $Nouter )"
         if [[ ! -f "$lastfwd1" ]] && [[ ! -f "$lastfwd2" ]]; then
             raise_error "Cannot find last forward file \"${lastfwd1}\" or \"${lastfwd2}\" (cycle $cycle)."
         fi
@@ -1499,7 +1508,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == dai ]]; then
         echo " • using DAI file to generate initial conditions"
-        cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new" 
+        cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == fwd ]]; then
         echo " • using FWD file to generate initial conditions"
         # outdated option but still supported
