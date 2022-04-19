@@ -9,16 +9,18 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.8.3
+VERSION=0.9
 
 ########################################################################
 #
 # VERSION history/notes
 #
 # 0.8    first github version
-# 0.8.1  adding util subdirectory to PATH, using nc_obsslice 
-# 0.8.2  exit with error if setting of in-file variables fails 
+# 0.8.1  adding util subdirectory to PATH, using nc_obsslice
+# 0.8.2  exit with error if setting of in-file variables fails
 # 0.8.3  added sbatch_args
+# 0.9    added -b/--sbatchargs option, -x/--exit-after-setup option
+#        and roms_startmode mpirun-plain
 ########################################################################
 
 ########################################################################
@@ -33,14 +35,16 @@ Start ROMS free (non-assimilative) simulation.
 
 optional arguments:
   -h, --help            Show this help message and exit.
-  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE 
-                        Use the configuration file CONFIGFILE instead of the 
+  -c CONFIGFILE, --configfile CONFIGFILE, --configfile=CONFIGFILE
+                        Use the configuration file CONFIGFILE instead of the
                         default \"run_roms.config\".
-  -m MACHINES, --machines MACHINES Allows specifying the machines to run 
-                        ROMS on (still requires valid machine file specified 
+  -m MACHINES, --machines MACHINES Allows specifying the machines to run
+                        ROMS on (still requires valid machine file specified
                         in configuration).
                         MACHINES must be a comma-separated list of machines,
                         e.g. \"node1,node2\"
+  -b --sbatchargs       Arguments to pass on to the sbatch call (only active
+                        if sbatch is used).
   -v, --version         Print \"version $VERSION\" and exit.
   -d, --debug           Switch on debug mode which will print more output
                         to standard out.
@@ -65,6 +69,8 @@ debug=false
 configfile="run_roms.config"
 sleep_for=""
 machines_input=""
+sbatch_args_manual=""
+exit_after_setup=false
 
 while :
 do
@@ -89,9 +95,17 @@ do
             configfile=${1#*=}  # Delete everything up till "="
             shift
             ;;
+        -b | --sbatchargs )
+            sbatch_args_manual="$2"
+            shift 2
+            ;;
         -m | --machines)
             machines_input=$2
             shift 2
+            ;;
+        -x | --exit-after-setup)
+            exit_after_setup=true
+            shift
             ;;
         -d | --debug)
             debug=true
@@ -133,7 +147,7 @@ config_dir=$(dirname $(readlink -f $configfile))
 
 # add directory with utility scripts to PATH and check if all required commands are available
 export PATH="${script_dir}:${script_dir}/util:${PATH}"
-for cmd in rif_setvar rif_isvar rif_getvar nc_obsslice ; do 
+for cmd in rif_setvar rif_isvar rif_getvar nc_obsslice ; do
     command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
 done
 
@@ -158,18 +172,18 @@ fi
 source "$configfile"
 if [[ "$?" -ne "0" ]]; then
     echo "An error occured while reading the configuration file.
-Ensure that it is a valid bash script; common problems include: 
+Ensure that it is a valid bash script; common problems include:
 (1) Invalid use of spaces in variable declarations, it must be
     cycle_length=4
 and not
     cycle_length = 4
-(2) Invalid use of spaces for variable values. If spaces are used, 
+(2) Invalid use of spaces for variable values. If spaces are used,
 in a variable value, they must be contained in '\"', for example
     title=\"4DVar experiment\"
-and not 
+and not
     title=4DVar experiment
 (3) Invalid characters/syntax error in paramchanges_ocean. If the ROMS
-variable name contain special characters, it is best to include the name 
+variable name contain special characters, it is best to include the name
 in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
     paramchanges_ocean=( \"Hout(idUvel)\"=T )
 " >&2
@@ -177,7 +191,7 @@ in '\"'. To set the \"Hout(idUvel)\" ROMS ocean.in variable to \"T\" use
 fi
 
 ########################################################################
-#  perform checks 
+#  perform checks
 ########################################################################
 
 nobio=false
@@ -226,7 +240,7 @@ elif [[ -n "$machines_input" ]] && [[ $roms_startmode != mpirun-machines ]]; the
     roms_startmode=mpirun-machines
 fi
 
-if [[ $roms_startmode == mpirun* ]]; then
+if [[ $roms_startmode == mpirun* ]] && [[ $roms_startmode != mpirun-plain ]]; then
     if [[ ! -f "$machinefile" ]]; then
         raise_error "Machine file \"$machinefile\" does not exist."
     fi
@@ -238,13 +252,17 @@ if [[ $roms_startmode == sbatch* ]]; then
     if [[ ! -f "$sbatchtemplate" ]]; then
         raise_error "Slurm sbatch template file \"$sbatchtemplate\" does not exist."
     fi
-    if [[ -z "$sbatchfile" ]]; then
-        sbatchfile="sbatch_job.bash"
+    if [[ -z "$sbatch_file" ]]; then
+        sbatch_file="sbatch_job.bash"
+    fi
+    # for backwards compatibility
+    if [[ -n "$sbatchfile" ]]; then
+        sbatch_file="$sbatchfile"
     fi
 fi
 
 if [[ -n "$output_local_basedir" ]] && [[ $roms_startmode != s* ]]; then
-    raise_error "Local storage is currently only supported for Slurm jobs with roms_startmode \"sbatch\", \"srun\", \"srun-bg\"." 
+    raise_error "Local storage is currently only supported for Slurm jobs with roms_startmode \"sbatch\", \"srun\", \"srun-bg\"."
 fi
 
 ##############################################################################
@@ -310,13 +328,13 @@ fi
 if [[ $use_verification == true ]]; then
     cp "$da_in" "$main_dir"
     da_in_local="$main_dir/$(basename $da_in)"
-    
+
     rif_setvar "$ocean_in_local" APARNAM "$(basename "$da_in_local")"
-    
+
     if [[ $slice_obsfile == true ]]; then
         #slice_args="--overwrite --includemaxdatenum"
         slice_args="--overwrite"
-        
+
         day_start="$(rif_getvar "$ocean_in_local" DSTART | sed -e "s/d0//" -e "s/\.0*//" )"
         ntimes="$(rif_getvar "$ocean_in_local" NTIMES | sed -e "s/d0//" -e "s/\.0*//" )"
 
@@ -326,7 +344,7 @@ if [[ $use_verification == true ]]; then
         #day_end=$((day_start + ntimes*dt/86400))
         #day_end="$(bc -l <<< "$day_start+$ntimes*$dt/86400")"
         day_end="$(bc -l <<< "$day_start+(${ntimes}-${num_dt_buffer})*$dt/86400")"
-        
+
         if $debug; then
             echo "day_start=${day_start}; ntimes=${ntimes}; dt=${dt}; day_end=${day_end}; num_dt_buffer=${num_dt_buffer}"
         fi
@@ -342,9 +360,9 @@ if [[ $use_verification == true ]]; then
         cp "$obsfile" "$obsfile_local"
         rif_setvar "$da_in_local" OBSname "$obsfile_local"
     else
-        rif_setvar "$da_in_local" OBSname "$obsfile" 
+        rif_setvar "$da_in_local" OBSname "$obsfile"
     fi
-    rif_setvar "$da_in_local" MODname "$(printf "$output_dir_files/$outputfile_mask" mod )" 
+    rif_setvar "$da_in_local" MODname "$(printf "$output_dir_files/$outputfile_mask" mod )"
 fi
 
 np=$(rif_getvar $ocean_in_local NtileI)
@@ -362,7 +380,7 @@ fi
 echo " • renaming output files"
 outvarnames=( gst rst his tlm tlf adj avg dia sta flt )
 for outname in ${outvarnames[*]}; do
-    outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]') 
+    outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
     rif_setvar "$ocean_in_local" "$outname_full" $(printf "$output_dir_files/$outputfile_mask" $outname)
 done
 
@@ -382,9 +400,9 @@ if [[ $roms_startmode == s* ]]; then
     fi
 
     if [[ -n "$output_local_basedir" ]]; then
-        # this early attempt does not appear to work as prolog is not executed on 
+        # this early attempt does not appear to work as prolog is not executed on
         # node
-         
+
         #prologfile="$main_dir/.run_roms_prolog.bash"
         #echo "#!/bin/bash" > "$prologfile"
         #echo "mkdir -p \"$output_dir_files\"" >> "$prologfile"
@@ -416,6 +434,10 @@ fi
 #  start ROMS
 ##############################################################################
 
+if [[ $exit_after_setup == true ]]; then
+    exit 0
+fi
+
 echo " • starting ROMS"
 if [[ $roms_startmode == mpirun-machines ]]; then
     echo "   using the following machines: \"$machines\""
@@ -439,34 +461,37 @@ elif [[ $roms_startmode == srun-bg ]]; then
     srun $slurmargs --ntasks $np $executable $ocean_in_local > $logfile &
 elif [[ $roms_startmode == sbatch* ]]; then
     # use sbatch to start job
-    
+
     if [[ "$sbatchname" == *%s* ]]; then
         sbatchname=$(printf "$sbatchname" $(date --iso=m))
     elif [[ -z "$sbatchname" ]]; then
         sbatchname="run_roms-$(basename "$config_dir")"
     fi
-    
-    cp "$sbatchtemplate" "$sbatchfile"
 
-    
-    # if ntasks-per-node is set, use np (ntasks) to set nodes
-    ntasks_per_node=$(sed -n "s/^#SBATCH  *--ntasks-per-node= *\([0-9][0-9]*\) .*/\1/p" < "$sbatchfile")
-    # accept possible user input sbatch_args
-    sbatch_args="$sbatch_args $slurmargs"
+    cp "$sbatchtemplate" "$sbatch_file"
+
+    # accept possible config parameter sbatch_args and user input sbatch_args_manual
+    # try to obtain ntasks-per-node from sbatch_args or else sbatch_file
+    sbatch_args="$sbatch_args $slurmargs $sbatch_args_manual"
+    if [[ $sbatch_args == *--ntasks-per-node=* ]]; then
+        ntasks_per_node=$(sed -r -n "s/.*--ntasks-per-node=([0-9]+).*/\1/p" <<< "$sbatch_args")
+    else
+        ntasks_per_node=$(sed -r -n "s/^#SBATCH  *--ntasks-per-node= *([0-9]+).*/\1/p" < "$sbatch_file")
+    fi
     if [[ -n "$ntasks_per_node" ]] ; then
         nodes=1
         while [[ $((np > nodes*ntasks_per_node)) == 1 ]]; do
             ((nodes++))
         done
         if [[ $nodes -ne $nodes_old ]]; then
-            echo "   adjusting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${np})" 
+            echo "   adjusting number of required nodes for job to ${nodes} (ntasks-per-node=${ntasks_per_node}, ntasks=${np})"
         fi
         sbatch_args="$sbatch_args --nodes=$nodes"
     fi
     # remove log file if it is present
     [[ -f "$logfile" ]] && rm -f "$logfile"
     echo "   submitting job with name \"$sbatchname\""
-    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatch_args --output="$logfile" "$sbatchfile")"
+    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatch_args --output="$logfile" "$sbatch_file")"
     echo "   $tmp"
     # tmp is something like "Submitted batch job 15211"
     if [[ $roms_startmode == sbatch-wait ]]; then
