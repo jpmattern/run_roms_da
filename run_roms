@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9
+VERSION=0.9.1
 
 ########################################################################
 #
@@ -21,6 +21,7 @@ VERSION=0.9
 # 0.8.3  added sbatch_args
 # 0.9    added -b/--sbatchargs option, -x/--exit-after-setup option
 #        and roms_startmode mpirun-plain
+# 0.9.1  added better quick file output support
 ########################################################################
 
 ########################################################################
@@ -378,7 +379,7 @@ if [ ! -d $output_dir ]; then
 fi
 
 echo " • renaming output files"
-outvarnames=( gst rst his tlm tlf adj avg dia sta flt )
+outvarnames=( gst rst his qck tlm tlf adj avg dia sta flt )
 for outname in ${outvarnames[*]}; do
     outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
     rif_setvar "$ocean_in_local" "$outname_full" $(printf "$output_dir_files/$outputfile_mask" $outname)

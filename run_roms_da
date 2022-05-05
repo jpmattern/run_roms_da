@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.8
+VERSION=0.9.9
 
 ########################################################################
 #
@@ -27,6 +27,7 @@ VERSION=0.9.8
 # 0.9.7     added -b/--sbatchargs option
 # 0.9.8     permitting combination of adaptive_paramchanges and
 #           adaptive_dt
+# 0.9.9     added better quick file output support
 ########################################################################
 
 ########################################################################
@@ -710,7 +711,7 @@ cycle=1
 cycle_time_sum=0
 day=$start_day
 
-outvarnames=( gst rst his tlm tlf adj avg dia sta flt itl iad ads irp )
+outvarnames=( gst rst his qck tlm tlf adj avg dia sta flt itl iad ads irp )
 # add dai if associated variable is present (dependent on ROMS version)
 rif_isvar "$ocean_in" DAINAME && outvarnames=( ${outvarnames[@]} dai )
 outvarnames_da=( hss err )
@@ -1137,7 +1138,7 @@ while [[ $day -lt $stop_day ]]; do
     rif_setvar $ocean_in_local ININAME $ini_file_local
     rif_setvar $ocean_in_local FWDNAME $FWDname
 
-    # setting gst, rst, his, tlm, tlf, adj, avg, dia, sta, flt, and dai file names
+    # setting gst, rst, his, qck, tlm, tlf, adj, avg, dia, sta, flt, and dai file names
     for outname in ${outvarnames[*]}; do
         outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
         rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
