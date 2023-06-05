@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.9
+VERSION=0.10
 
 ########################################################################
 #
@@ -28,6 +28,7 @@ VERSION=0.9.9
 # 0.9.8     permitting combination of adaptive_paramchanges and
 #           adaptive_dt
 # 0.9.9     added better quick file output support
+# 0.10      added --nice support
 ########################################################################
 
 ########################################################################
@@ -65,6 +66,8 @@ optional arguments:
                         e.g. \"node1,node2\"
   -b --sbatchargs       Arguments to pass on to the sbatch call (only active
                         if sbatch is used).
+  --nice                Set the Slurm nice level (only active if sbatch is
+                        used).
   -v, --version         Print \"version $VERSION\" and exit.
   -d, --debug           Switch on debug mode which will print more output
                         to standard out.
@@ -118,7 +121,11 @@ while [[ -n "$1" ]]; do
             shift 2
             ;;
         -b | --sbatchargs )
-            sbatch_args_manual="$2"
+            sbatch_args_manual="${sbatch_args_manual} $2"
+            shift 2
+            ;;
+        --nice )
+            sbatch_args_manual="${sbatch_args_manual} --nice=$2"
             shift 2
             ;;
         --configfile=*)
@@ -181,6 +188,7 @@ if $debug; then
     echo "├ debug=$debug"
     echo "├ configfile=$configfile"
     echo "├ clean_nc=$clean_nc"
+    echo "├ sbatch_args_manual=$sbatch_args_manual"
 fi
 
 # current script directory
