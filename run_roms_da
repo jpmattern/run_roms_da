@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.10
+VERSION=1.0
 
 ########################################################################
 #
@@ -29,6 +29,8 @@ VERSION=0.10
 #           adaptive_dt
 # 0.9.9     added better quick file output support
 # 0.10      added --nice support
+# 0.11      added --maxcycles argument
+# 1.0       updated help text and turned it into vesion 1.0
 ########################################################################
 
 ########################################################################
@@ -64,10 +66,13 @@ optional arguments:
                         in configuration).
                         MACHINES must be a comma-separated list of machines,
                         e.g. \"node1,node2\"
-  -b --sbatchargs       Arguments to pass on to the sbatch call (only active
+  -b --sbatchargs SBATCHARGS
+                        Pass SBATCHARGS as arguments to sbatch call (e.g.:
+                          --sbatchargs \"--partition=partitionname\"
+                        only active if sbatch is used).
+  --nice NICELEVEL      Set the Slurm nice level to NICELEVEL (only active
                         if sbatch is used).
-  --nice                Set the Slurm nice level (only active if sbatch is
-                        used).
+  --maxcycles MAXCYCLES Run a maximum of MAXCYCLES before terminating.
   -v, --version         Print \"version $VERSION\" and exit.
   -d, --debug           Switch on debug mode which will print more output
                         to standard out.
@@ -97,6 +102,7 @@ machines_input=""
 report_time=true
 machines_numidle_input=""
 sbatch_args_manual=""
+maxcycles=""
 
 while [[ -n "$1" ]]; do
     case $1 in
@@ -126,6 +132,10 @@ while [[ -n "$1" ]]; do
             ;;
         --nice )
             sbatch_args_manual="${sbatch_args_manual} --nice=$2"
+            shift 2
+            ;;
+        --max | --maxcycles )
+            maxcycles=$2
             shift 2
             ;;
         --configfile=*)
@@ -847,6 +857,7 @@ fi
 
 # number of cycles already passed; needed in case of restarts for timekeeping
 cycle_ini=$(($cycle-1))
+[[ -n "$maxcycles" ]] && cycle_num_manual=$((cycle+maxcycles))
 day_ini=$day
 cycle_length_orig=$cycle_length_roms
 if $adaptive_dt; then
@@ -1692,6 +1703,27 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
 
         echo "DONE - received break signal."
         exit 0
+    fi
+
+    #---------------------------------------------------------------------
+    # Check if maxcycles has been reached.
+    #---------------------------------------------------------------------
+
+    if [[ -n "$maxcycles" ]] && [[ $cycle_num_manual -lt $cycle_num ]]; then
+        cycle_rem=$((cycle_num_manual-cycle))
+        if [[ $report_time == true ]]; then
+            printf "   cycles remaining:   %6d (manual override based on maxcycles=%d)\n" $cycle_rem $maxcycles
+            printf "   expected end:       %s\n" "$(date --date="$((cycle_rem*cycle_time)) seconds" +"%d-%b-%Y %T")"
+        else
+            printf "   maxcycles option is active limiting the number of remaining cycles\n"
+        fi
+        if [[ $cycle_rem == 0 ]]; then
+            echo " • completed ${maxcycles} cycles since last (re)start"
+            echo "   restart at ${cycle}:${day}"
+
+            echo "DONE - maximum number of cycles reached."
+            exit 0
+        fi
     fi
 done
 
