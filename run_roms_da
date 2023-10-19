@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.0
+VERSION=1.1
 
 ########################################################################
 #
@@ -30,7 +30,8 @@ VERSION=1.0
 # 0.9.9     added better quick file output support
 # 0.10      added --nice support
 # 0.11      added --maxcycles argument
-# 1.0       updated help text and turned it into vesion 1.0
+# 1.0       updated help text and turned it into version 1.0
+# 1.1       added support for non-integer start and stop day
 ########################################################################
 
 ########################################################################
@@ -85,6 +86,11 @@ function raise_error()
 echo "ERROR – $1" >&2
 #tput sgr0
 exit 1
+}
+
+function compute_and_round()
+{
+printf "%.0f" "$(bc -l <<< "$1")"
 }
 
 # default values for variables that might be set
@@ -734,9 +740,9 @@ outvarnames=( gst rst his qck tlm tlf adj avg dia sta flt itl iad ads irp )
 rif_isvar "$ocean_in" DAINAME && outvarnames=( ${outvarnames[@]} dai )
 outvarnames_da=( hss err )
 
-# ceil(a/b) == floor((a+b-1)/b)
-#cycle_num=$((($stop_day-$start_day+$cycle_length-1)/$cycle_length + 1))
-cycle_num=$((($stop_day-$start_day)/$cycle_length+(($stop_day-$start_day)%$cycle_length > 0)+($stop_day==$start_day)))
+#cycle_num=$((($stop_day-$start_day)/$cycle_length+(($stop_day-$start_day)%$cycle_length > 0)+($stop_day==$start_day)))
+cycle_num=$(compute_and_round "($stop_day-$start_day)/$cycle_length+(($stop_day-$start_day)%$cycle_length > 0)+($stop_day==$start_day)")
+
 # Number of nodes to use.
 num_nodes=$(($NtileI*$NtileJ))
 month_array=( ZERO jan feb mar apr may jun jul aug sep oct nov dec )
@@ -822,15 +828,15 @@ if $perform_restart; then
             fi
         fi
         logfile="${logfiles[$((${#logfiles[@]}-1))]}"
-        day=$(sed -n "s/.*${roms_logfile_mask//%d/\([0-9]\{1,\}\)}/\1/p" <<< "$logfile")
-        day_log=$(tail -n 200 "$run_roms_logfile" | sed -n "s/^ • running .* algorithm, starting day:  *\([0-9]\{1,\}\).*/\1/p" | tail -n 1)
+        day=$(sed -nr "1,2000 s/^ *([0-9.]+) +dstart .*/\1/p" << "$logfile")
+        day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • running .* algorithm, starting day:  *([0-9.]+).*/\1/p" | tail -n 1)
         if [[ -z "$day" ]]; then
             echo "WARNING – Cannot find day in ROMS log file, using day from run_roms_da log." >&2
             day="$day_log"
             if [[ -z "$day" ]]; then
                 raise_error "Cannot find day in run_roms_da log file."
             fi
-        elif [[ "$day" -ne "$day_log" ]]; then
+        elif [[ $(bc <<< "$day != $day_log") == 1 ]]; then
             raise_error "Day in ROMS log file ($day) does not agree with day in run_roms_da log ($day_log). Are multiple ROMS log-files present?"
         fi
         cycle=$(tail -n 1000 "$run_roms_logfile" | tac | sed -n "1,/^ • starting data assimilation/ s/^ • starting data assimilation cycle: *\([0-9]\{1,\}\).*/\1/p")
@@ -841,7 +847,7 @@ if $perform_restart; then
     fi
     if $perform_restart_extend; then
         echo "restart: Identified cycle $cycle (day $day) as the last finished cycle, extending run."
-        ((day+=cycle_length))
+        day=$(bc <<< "$day + $cycle_length")
         ((cycle++))
         echo "restart: extending run starting at current cycle $cycle (day $day)"
     else
@@ -858,7 +864,8 @@ fi
 # number of cycles already passed; needed in case of restarts for timekeeping
 cycle_ini=$(($cycle-1))
 [[ -n "$maxcycles" ]] && cycle_num_manual=$((cycle+maxcycles))
-day_ini=$day
+day_floor=${day%.*}
+[[ $debug == true ]] && echo "debug: day=$day, day_floor=$day_floor"
 cycle_length_orig=$cycle_length_roms
 if $adaptive_dt; then
     dt_orig=$dt
@@ -875,15 +882,16 @@ if [[ $adaptive_paramchanges == true ]]; then
 fi
 # bio_in_old is not guaranteed to exist
 if [[ -n "$bio_in_local_mask" ]]; then
-    bio_in_old="$storage_dir/$(printf "$bio_in_local_mask" $((day-cycle_length)))"
+    bio_in_old="$storage_dir/$(printf "$bio_in_local_mask" $((day_floor-cycle_length)))"
 else
     bio_in_old="$storage_dir/$bio_in_local"
 fi
 
-while [[ $day -lt $stop_day ]]; do
+while [[ $(bc <<< "$day < $stop_day") == 1 ]]; do
     cycle_start=$(date +"%s")
-    day_unix=$(($roms_time_ref_unix + $day*86400))
-    cycle_date=$(date --date=@$day_unix -u --iso-8601)
+    day_unix=$(bc -l <<< "$roms_time_ref_unix + $day*86400")
+    cycle_date=$(date --date=@$day_unix -u +"%Y-%m-%d %H:%M")
+    day_plus_cycle=$(bc <<< "$day + $cycle_length_roms")
     if $debug; then
         echo "debug: cycle_date=\"$cycle_date\" ($(date --date=@$day_unix -u --iso-8601=seconds))"
     fi
@@ -903,13 +911,13 @@ while [[ $day -lt $stop_day ]]; do
     #---------------------------------------------------------------------
 
     # update/set file names
-    ini_file_local=${file_prefix}_ini_${day}.nc
-    mod_file_local=${file_prefix}_mod_${day}.nc
-    log_file=$(printf "$roms_logfile_mask" $day)
+    ini_file_local=${file_prefix}_ini_${day_floor}.nc
+    mod_file_local=${file_prefix}_mod_${day_floor}.nc
+    log_file=$(printf "$roms_logfile_mask" $day_floor)
 
-    FWDname=${file_prefix}_fwd_${day}.nc
+    FWDname=${file_prefix}_fwd_${day_floor}.nc
     if [[ $da_adjust == free ]]; then
-        FWDname=${file_prefix}_his_${day}.nc
+        FWDname=${file_prefix}_his_${day_floor}.nc
     fi
 
     if [[ "$log_file" =~ .*\ .* ]]; then
@@ -921,7 +929,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $cycle -gt 1 ]] && [[ -f "$ocean_in_local" ]]; then
             /bin/rm "$ocean_in_local"
         fi
-        ocean_in_local=$(printf "$ocean_in_local_mask" $day)
+        ocean_in_local=$(printf "$ocean_in_local_mask" $day_floor)
     fi
 
     if [[ -n "$bio_in_local_mask" ]]; then
@@ -929,7 +937,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $cycle -gt 1 ]] && [[ -f "$bio_in_local" ]]; then
             /bin/rm "$bio_in_local"
         fi
-        bio_in_local=$(printf "$bio_in_local_mask" $day)
+        bio_in_local=$(printf "$bio_in_local_mask" $day_floor)
     fi
 
     if [[ -n "$da_in_local_mask" ]]; then
@@ -937,7 +945,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $cycle -gt 1 ]] && [[ -f "$da_in_local" ]]; then
             /bin/rm "$da_in_local"
         fi
-        da_in_local=$(printf "$da_in_local_mask" $day)
+        da_in_local=$(printf "$da_in_local_mask" $day_floor)
     fi
 
     # Clean directory by removing all existing netCDF files.
@@ -945,9 +953,9 @@ while [[ $day -lt $stop_day ]]; do
     if $clean_nc; then
         if $debug; then
             echo "debug: files being removed:"
-            ls $main_dir/"${file_prefix}"*"$day"*.nc
+            ls $main_dir/"${file_prefix}"*"$day_floor"*.nc
         fi
-        /bin/rm $main_dir/"${file_prefix}"*"$day"*.nc 2> /dev/null
+        /bin/rm $main_dir/"${file_prefix}"*"$day_floor"*.nc 2> /dev/null
     fi
 
     # -F option shows the same variable indexed with Fortran conventions (1-based)
@@ -960,7 +968,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $stdi_file_local_mask == *%s* ]]; then
             stdi_file_local=$(printf "$stdi_file_local_mask" ${month_array[$cur_month]})
         elif [[ $stdi_file_local_mask == *%d* ]]; then
-            stdi_file_local=$(printf "$stdi_file_local_mask" ${day})
+            stdi_file_local=$(printf "$stdi_file_local_mask" ${day_floor})
         fi
         if [[ $slice_stdi_file == true ]]; then
             if $debug ; then
@@ -978,7 +986,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $stdf_file_local_mask == *%s* ]]; then
             stdf_file_local=$(printf "$stdf_file_local_mask" ${month_array[$cur_month]})
         elif [[ $stdf_file_local_mask == *%d* ]]; then
-            stdf_file_local=$(printf "$stdf_file_local_mask" ${day})
+            stdf_file_local=$(printf "$stdf_file_local_mask" ${day_floor})
         fi
         if [[ $slice_stdf_file == true ]]; then
             ncks -F --overwrite -d ocean_time,${cur_month} "$stdf_file" "$stdf_file_local"
@@ -993,7 +1001,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $stdb_file_local_mask == *%s* ]]; then
             stdb_file_local=$(printf "$stdb_file_local_mask" ${month_array[$cur_month]})
         elif [[ $stdb_file_local_mask == *%d* ]]; then
-            stdb_file_local=$(printf "$stdb_file_local_mask" ${day})
+            stdb_file_local=$(printf "$stdb_file_local_mask" ${day_floor})
         fi
         if [[ $slice_stdb_file == true ]]; then
             ncks -F --overwrite -d ocean_time,${cur_month} "$stdb_file" "$stdb_file_local"
@@ -1008,7 +1016,7 @@ while [[ $day -lt $stop_day ]]; do
         if [[ $stdm_file_local_mask == *%s* ]]; then
             stdm_file_local=$(printf "$stdm_file_local_mask" ${month_array[$cur_month]})
         elif [[ $stdm_file_local_mask == *%d* ]]; then
-            stdm_file_local=$(printf "$stdm_file_local_mask" ${day})
+            stdm_file_local=$(printf "$stdm_file_local_mask" ${day_floor})
         fi
         if [[ $slice_stdm_file == true ]]; then
             ncks -F --overwrite -d ocean_time,${cur_month} "$stdm_file" "$stdm_file_local"
@@ -1022,7 +1030,7 @@ while [[ $day -lt $stop_day ]]; do
 
     # initial conditions file
 
-    if [[ $day -eq $start_day ]]; then
+    if [[ $(bc <<< "$day == $start_day") == 1 ]]; then
         if [[ ! -f "$ini_file" ]]; then
             raise_error "Cannot find initial file \"$ini_file\"."
         fi
@@ -1042,7 +1050,7 @@ while [[ $day -lt $stop_day ]]; do
 
     if $obs_multifile; then
         counter=0
-        while [[ $day -ge ${obs_filedates[$counter]} ]]; do
+        while [[ $(bc <<< "$day >= ${obs_filedates[$counter]}") == 1 ]]; do
             counter=$((counter + 1))
         done
         counter=$((counter - 1))
@@ -1066,22 +1074,22 @@ while [[ $day -lt $stop_day ]]; do
     fi
 
     if $slice_obsfile; then
-        obs_file_slice="${file_prefix}_obs_${day}.nc"
+        obs_file_slice="${file_prefix}_obs_${day_floor}.nc"
         slice_args="--overwrite"
         if $slice_includelasttimestep; then
             slice_args="--overwrite --includemaxdatenum"
         fi
-        echo "   slice_obsfile: slicing obsfile (from $day to $((day+cycle_length_roms))) to create \"$obs_file_slice\"."
+        echo "   slice_obsfile: slicing obsfile (from $day to $day_plus_cycle) to create \"$obs_file_slice\"."
         if $use_nc_obsfile; then
             if $debug; then
-                echo "debug: executing: nc_obsfile slice \"$obs_file\" --datenum \"$day:$((day+cycle_length_roms))\" --out \"$obs_file_slice\" ${slice_args}"
+                echo "debug: executing: nc_obsfile slice \"$obs_file\" --datenum \"$day:$day_plus_cycle\" --out \"$obs_file_slice\" ${slice_args}"
             fi
-            nc_obsfile slice "$obs_file" --datenum "$day:$((day+cycle_length_roms))" --out "$obs_file_slice" ${slice_args}
+            nc_obsfile slice "$obs_file" --datenum "$day:$day_plus_cycle" --out "$obs_file_slice" ${slice_args}
         else
             if $debug; then
-                echo "debug: executing: nc_obsslice $slice_args \"$obs_file\" $day $((day+cycle_length_roms)) \"$obs_file_slice\""
+                echo "debug: executing: nc_obsslice $slice_args \"$obs_file\" $day $day_plus_cycle \"$obs_file_slice\""
             fi
-            nc_obsslice $slice_args "$obs_file" $day $((day+cycle_length_roms)) "$obs_file_slice"
+            nc_obsslice $slice_args "$obs_file" $day $day_plus_cycle "$obs_file_slice"
         fi
         [[ $? -ne 0 ]] && raise_error "Slicing of obsfile failed."
         obs_file_local="$obs_file_slice"
@@ -1122,7 +1130,7 @@ while [[ $day -lt $stop_day ]]; do
     # changes to the output variable names
     for outname in ${outvarnames[*]}; do
         outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
-        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day_floor}.nc"
     done
 
     NTIMES=$((cycle_length_roms*86400/dt))
@@ -1160,7 +1168,7 @@ while [[ $day -lt $stop_day ]]; do
     # setting gst, rst, his, qck, tlm, tlf, adj, avg, dia, sta, flt, and dai file names
     for outname in ${outvarnames[*]}; do
         outname_full=$(echo "${outname}NAME" | tr '[:lower:]' '[:upper:]')
-        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+        rif_setvar $ocean_in_local "$outname_full" "${file_prefix}_${outname}_${day_floor}.nc"
     done
     # empty da_in indicates free simulation
     if [[ -n "$da_in" ]]; then
@@ -1226,7 +1234,7 @@ while [[ $day -lt $stop_day ]]; do
         # changes to other output variable names
         for outname in ${outvarnames_da[*]}; do
             outname_full="$(tr '[:lower:]' '[:upper:]' <<< "$outname")name"
-            rif_setvar $da_in_local "$outname_full" "${file_prefix}_${outname}_${day}.nc"
+            rif_setvar $da_in_local "$outname_full" "${file_prefix}_${outname}_${day_floor}.nc"
         done
     fi
 
@@ -1399,7 +1407,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
         fi
         echo "   submitting job with name \"$sbatch_name\""
         if $use_sbatch_donefile ; then
-            donefile="$main_dir/.run_roms_da.completed${day}.tmp"
+            donefile="$main_dir/.run_roms_da.completed${day_floor}.tmp"
             if [[ -f "$donefile" ]]; then
                 /bin/rm "$donefile"
             fi
@@ -1534,14 +1542,14 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     # Move select files to storage.
     #
 
-    ini_file_local_new="$storage_dir/${file_prefix}_ini_$(($day+cycle_length)).nc"
+    ini_file_local_new="$storage_dir/${file_prefix}_ini_$(($day_floor+cycle_length)).nc"
 
     if [[ $ini_filetype == rst ]]; then
         echo " • using RST file to generate initial conditions"
-        ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day}.nc" "$ini_file_local_new"
+        ncks --overwrite -d ocean_time,0 "${file_prefix}_rst_${day_floor}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == dai ]]; then
         echo " • using DAI file to generate initial conditions"
-        cp -a "${file_prefix}_dai_${day}.nc" "$ini_file_local_new"
+        cp -a "${file_prefix}_dai_${day_floor}.nc" "$ini_file_local_new"
     elif [[ $ini_filetype == fwd ]]; then
         echo " • using FWD file to generate initial conditions"
         # outdated option but still supported
@@ -1637,9 +1645,9 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     if $clean_nc; then
         if $debug; then
             echo "debug: files being removed:"
-            ls $main_dir/"${file_prefix}"*"$day"*.nc
+            ls $main_dir/"${file_prefix}"*"$day_floor"*.nc
         fi
-        /bin/rm -f $main_dir/"${file_prefix}"*"$day"*.nc 2> /dev/null
+        /bin/rm -f $main_dir/"${file_prefix}"*"$day_floor"*.nc 2> /dev/null
     fi
 
     #---------------------------------------------------------------------
@@ -1670,7 +1678,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     # Advance counters.
     #---------------------------------------------------------------------
 
-    ((day+=cycle_length))
+    day=$day_plus_cycle
     ((cycle++))
 
     # if adaptive_dt is active, reset dt if required
