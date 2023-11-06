@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.1
+VERSION=1.1.1
 
 ########################################################################
 #
@@ -32,6 +32,7 @@ VERSION=1.1
 # 0.11      added --maxcycles argument
 # 1.0       updated help text and turned it into version 1.0
 # 1.1       added support for non-integer start and stop day
+# 1.1.1     bugfixes related to changes in 1.1
 ########################################################################
 
 ########################################################################
@@ -818,6 +819,7 @@ if $perform_restart; then
         day=${day#*:}
     else
         logfiles=($main_dir/${roms_logfile_mask//%d/*})
+        day_offset=0
         if [[ ${#logfiles[@]} > 1 ]]; then
             echo "WARNING – Found more than one log file in \"$main_dir\", using last." >&2
         elif [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
@@ -826,10 +828,20 @@ if $perform_restart; then
             if [[ ${logfiles[0]} == *\** ]] || [[ ${#logfiles[@]} == 0 ]]; then
                 raise_error "Found no log files in base directory or storage."
             fi
+            # when storage dir log-file is used, add cycle_length
+            day_offset=$cycle_length
         fi
         logfile="${logfiles[$((${#logfiles[@]}-1))]}"
-        day=$(sed -nr "1,2000 s/^ *([0-9.]+) +dstart .*/\1/p" << "$logfile")
-        day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • running .* algorithm, starting day:  *([0-9.]+).*/\1/p" | tail -n 1)
+        if $debug; then
+            echo "debug: querying logfile=$logfile"
+        fi
+        day=$(sed -nr "1,2000 s/^ *([0-9.]+) +dstart .*/\1/p" < "$logfile")
+        day=$(bc <<< "$day+$day_offset")
+        # day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • running .* algorithm, starting day:  *([0-9.]+).*/\1/p" | tail -n 1)
+        day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • starting data assimilation cycle.*day *([0-9.]+).*/\1/p" | tail -n 1)
+        if $debug; then
+            echo "debug: day=$day (from ROMS log, with a $day_offset day offset added), day_log=$day_log (from run_roms_da log)"
+        fi
         if [[ -z "$day" ]]; then
             echo "WARNING – Cannot find day in ROMS log file, using day from run_roms_da log." >&2
             day="$day_log"
@@ -1679,6 +1691,7 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
     #---------------------------------------------------------------------
 
     day=$day_plus_cycle
+    day_floor=${day%.*}
     ((cycle++))
 
     # if adaptive_dt is active, reset dt if required
