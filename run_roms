@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=0.9.2
+VERSION=1.0
 
 ########################################################################
 #
@@ -23,6 +23,7 @@ VERSION=0.9.2
 #        and roms_startmode mpirun-plain
 # 0.9.1  added better quick file output support
 # 0.9.2  bugfix
+# 1.0    improved support for starting run_roms outside of config_dir
 ########################################################################
 
 ########################################################################
@@ -47,6 +48,8 @@ optional arguments:
                         e.g. \"node1,node2\"
   -b --sbatchargs       Arguments to pass on to the sbatch call (only active
                         if sbatch is used).
+  -p, --printid         Print the sbatch job ID in the last line of output
+                        (only active if sbatch is used).
   -v, --version         Print \"version $VERSION\" and exit.
   -d, --debug           Switch on debug mode which will print more output
                         to standard out.
@@ -73,6 +76,7 @@ sleep_for=""
 machines_input=""
 sbatch_args_manual=""
 exit_after_setup=false
+print_jobid_in_last_line=false
 
 while :
 do
@@ -104,6 +108,10 @@ do
         -m | --machines)
             machines_input=$2
             shift 2
+            ;;
+        -p | --printid | --print-id )
+            print_jobid_in_last_line=true
+            shift
             ;;
         -x | --exit-after-setup)
             exit_after_setup=true
@@ -150,7 +158,7 @@ config_dir=$(dirname $(readlink -f $configfile))
 # add directory with utility scripts to PATH and check if all required commands are available
 export PATH="${script_dir}:${script_dir}/util:${PATH}"
 for cmd in rif_setvar rif_isvar rif_getvar nc_obsslice ; do
-    command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms_da."
+    command -v $cmd >/dev/null 2>&1 || raise_error "Cannot find \"$cmd\" command that is required to run run_roms."
 done
 
 ########################################################################
@@ -248,14 +256,14 @@ if [[ $roms_startmode == mpirun* ]] && [[ $roms_startmode != mpirun-plain ]]; th
     fi
 fi
 if [[ $roms_startmode == sbatch* ]]; then
-    if [[ $roms_startmode != sbatch ]] && [[ $roms_startmode != sbatch-wait ]]; then
+    if [[ $roms_startmode != sbatch ]]; then
         raise_error "Invalid roms_startmode \"$roms_startmode\"."
     fi
     if [[ ! -f "$sbatchtemplate" ]]; then
         raise_error "Slurm sbatch template file \"$sbatchtemplate\" does not exist."
     fi
     if [[ -z "$sbatch_file" ]]; then
-        sbatch_file="sbatch_job.bash"
+        sbatch_file="$script_dir/sbatch_job.bash"
     fi
     # for backwards compatibility
     if [[ -n "$sbatchfile" ]]; then
@@ -352,7 +360,7 @@ if [[ $use_verification == true ]]; then
             echo "day_start=${day_start}; ntimes=${ntimes}; dt=${dt}; day_end=${day_end}; num_dt_buffer=${num_dt_buffer}"
         fi
 
-        echo " • slicing obsfile (from $day_start to ${day_end%.00000000000000000000} to create \"$(basename $obsfile_local)\"."
+        echo " • slicing obsfile (from $day_start to ${day_end%.00000000000000000000} to create \"$(basename $obsfile_local)\")."
         if $debug; then
             echo "debug: executing: $slice_exe $slice_args \"$obsfile\" \"$day_start\" \"$day_end\" \"$obsfile_local\""
         fi
@@ -494,16 +502,9 @@ elif [[ $roms_startmode == sbatch* ]]; then
     # remove log file if it is present
     [[ -f "$logfile" ]] && rm -f "$logfile"
     echo "   submitting job with name \"$sbatchname\""
-    tmp="$(sbatch --job-name="$sbatchname" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatch_args --output="$logfile" "$sbatch_file")"
-    echo "   $tmp"
-    # tmp is something like "Submitted batch job 15211"
-    if [[ $roms_startmode == sbatch-wait ]]; then
-        jobid=$(cut -d ' ' -f 4 <<< "$tmp")
-        echo "   waiting until job with id $jobid terminates"
-        while [[ -n "$(squeue -j $jobid --noheader)" ]] ; do
-            sleep 5s
-        done
-    fi
+    jobid="$(sbatch --parsable --job-name="$sbatchname" --chdir="$config_dir" --export="ALL,ROMS_EXECUTABLE=$executable,ROMS_INFILE=$ocean_in_local" --ntasks=$np $sbatch_args --output="$logfile" "$sbatch_file")"
+    echo "   submitted sbatch job with ID $jobid"
+    [[ $print_jobid_in_last_line==true ]] && echo $jobid
 else
     mpirun -np $np $executable $ocean_in_local > $logfile
 fi
