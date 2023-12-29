@@ -1,7 +1,7 @@
 #!/bin/bash
 # written by Paul Mattern
 
-VERSION=1.6
+VERSION=1.7
 
 # VERSION history
 # 1.1    added preservation of file attributes
@@ -22,6 +22,7 @@ VERSION=1.6
 # 1.5.3  more exit 1 statements, print pid
 # 1.5.4  fixed small bug introduced in 1.5.3
 # 1.6    added --ispacked option
+# 1.7    added --time option
 
 deflatelevel=1
 nicelevel=10
@@ -36,6 +37,7 @@ debug=false
 sim=false
 printonly=false
 checkispacked=false
+timeit=false
 
 unpackifpacked=false
 packonly=false
@@ -110,6 +112,8 @@ optional arguments:
   --ispacked                Quit with status 0 if first file is packed, with status 1
                             otherwise (for use in if statements in bash scripts).
                             modify files.
+  -t, --time                Print the duration of each compression or packing
+                            operation.
   -v, --version             Print \"version $VERSION\" and exit.
   --debug                   Switch on debug mode which will print more output
                             to standard out.
@@ -203,6 +207,10 @@ do
         -q | --quiet)
             verbose=false
             semiverbose=false
+            shift
+            ;;
+        -t | --time)
+            timeit=true
             shift
             ;;
         -q2 | --q2 | --pc | --printchanges)
@@ -321,6 +329,7 @@ for nc in ${ncfiles[@]}; do
     elif $verbose; then
         echo " - processing \"$nc\" (format: \"$format\")"
     fi
+    SECONDS=0
     num_packed=$(ncdump -h "$nc" | sed -r -n "s/^\s*[^ ]+:add_offset *= */&/p" | wc -l )
     if [[ $checkispacked == true ]]; then
         [[ $num_packed -gt 0 ]] && exit 0
@@ -552,6 +561,12 @@ for nc in ${ncfiles[@]}; do
         if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
             size_new="$(wc -c < "$nc")"
             printf "   created a %2.1f%% reduction in file size (%d -> %d)\n" "$(bc -l <<< "100*(1-$size_new/$size_old)")" "$size_old" "$size_new"
+        fi
+        if [[ $timeit == true ]]; then
+            duration=$SECONDS
+            timeformatstr="%H:%M:%S"
+            [[ $duration -lt 3600 ]] && timeformatstr="%M:%S"
+            TZ=UTC0 printf "   time elapsed during operation: %(${timeformatstr})T\n" $duration
         fi
     else
         echo "   file was not changed -- simulation only"
