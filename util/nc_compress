@@ -1,7 +1,7 @@
 #!/bin/bash
-# written by Paul Mattern
+# written by Jann Paul Mattern
 
-VERSION=1.7
+VERSION=1.8
 
 # VERSION history
 # 1.1    added preservation of file attributes
@@ -23,6 +23,9 @@ VERSION=1.7
 # 1.5.4  fixed small bug introduced in 1.5.3
 # 1.6    added --ispacked option
 # 1.7    added --time option
+# 1.8    fixed bug that could leave original file
+#        changed if an error occured during packing;
+#        improved temporary file names
 
 deflatelevel=1
 nicelevel=10
@@ -68,7 +71,7 @@ optional arguments:
   -p, --pack                Pack files (using ncpdq) after compression.
                             nc_compress does not pack variables deemed unsafe for
                             packing (0,1 and 2-dimensional) variables.
-                            To force
+                            To force packing, use the --forcepacking option.
                             Packing is not lossless and information loss can occur.
                             Do not apply packing to files without testing its
                             effects first.
@@ -354,12 +357,12 @@ for nc in ${ncfiles[@]}; do
         [[ $num_packed -gt 0 ]] && echo "   found $num_packed packed variables"
     fi
 
-    nc_tmp="${nc}.nc_compress.tmp"
+    nc_tmp="${nc}.nc_compress.${$}.tmp"
     if [[ -f "$nc_tmp" ]]; then
         counter=1
         while [[ -f "$nc_tmp" ]]; do
             ((counter+=1))
-            nc_tmp="${nc}.nc_compress${counter}.tmp"
+            nc_tmp="${nc}.nc_compress${$}${counter}.tmp"
         done
     fi
     nc_tmp2="${nc_tmp//.tmp/.a.tmp}"
@@ -503,6 +506,24 @@ for nc in ${ncfiles[@]}; do
                         # look for variables with fill value among those in variables_pack
                         ncatted_args="$(ncdump -h "$sour" | sed -n -r "s/^\s*($(tr ',' '|' <<< "$variables_pack")):_FillValue .*/-a _FillValue,\1,o,f,${newfillvalue}/p" | tr '\n' ' ')"
                         if [[ -n "$ncatted_args" ]]; then
+                            # packing with fill values is complicated, see: https://sourceforge.net/p/nco/discussion/9830/thread/c266c9b3/
+                            # keep original file untouched, copy source to new file if needed
+                            if [[ $sour == $nc ]]; then
+                                if $debug; then
+                                    echo "debug: copying source file to \"${nc_tmp2}\", changing the _FillValue to be within packed range"
+                                fi
+                                cp "$sour" "$nc_tmp2"
+                                sour="$nc_tmp2"
+                                if [[ $sour == $dest ]]; then
+                                    # this should not happen, remove this check after some testing
+                                    echo "ERROR -- internal error." >&2
+                                    if $debug; then
+                                        echo "sour=\"$sour\", dest=\"$dest\""
+                                    fi
+                                    rm -f "$nc_tmp" "$nc_tmp2"
+                                    exit 1
+                                fi
+                            fi
                             nice -n $nicelevel ncatted $ncatted_args "$sour"
                             if [[ "$?" -ne "0" ]]; then
                                 echo "ERROR -- something went wrong during ncatted operation." >&2
