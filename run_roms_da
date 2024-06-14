@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.1.1
+VERSION=1.1.2
 
 ########################################################################
 #
@@ -33,6 +33,7 @@ VERSION=1.1.1
 # 1.0       updated help text and turned it into version 1.0
 # 1.1       added support for non-integer start and stop day
 # 1.1.1     bugfixes related to changes in 1.1
+# 1.1.2     bugfix for -e/--extend option
 ########################################################################
 
 ########################################################################
@@ -829,7 +830,10 @@ if $perform_restart; then
                 raise_error "Found no log files in base directory or storage."
             fi
             # when storage dir log-file is used, add cycle_length
-            day_offset=$cycle_length
+            # but only if the run is not extended
+            if [[ $perform_restart_extend == false ]]; then
+                day_offset=$cycle_length
+            fi
         fi
         logfile="${logfiles[$((${#logfiles[@]}-1))]}"
         if $debug; then
