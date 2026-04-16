@@ -26,17 +26,34 @@ then
     echo "ERROR – \"$infile\" is not a regular file." >&2
     exit 1
 fi
+empty_value=false
 varcheck=`grep -on "^\(\ *$varname\ *=\{1,2\}\ *\)\([^!]*[^! ]\)" $infile | wc -l`
-if [ $varcheck = 0 ]
+if [ $varcheck == 0 ]
 then
-    echo "ERROR – Variable \"$varname\" does not exist." >&2
-    exit 1
+    varcheck=`grep -on "^\ *$varname\ *= *$" $infile | wc -l`
+    if [ $varcheck == 0 ]
+        then
+        echo "ERROR – Variable \"$varname\" does not exist." >&2
+        exit 1
+    else
+        empty_value=true
+    fi
 fi
 
 if [ $infile -ef $outfile ]
 then
-    sed -i $infile -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)[^!]*[^! ]\(.*\)/\1${value//\//\\/}\2/g"
+    if [ $empty_value == true ]
+    then
+        sed -i $infile -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)/\1${value//\//\\/}/g"
+    else
+        sed -i $infile -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)[^!]*[^! ]\(.*\)/\1${value//\//\\/}\2/g"
+    fi
 else
-    sed -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)[^!]*[^! ]\(.*\)/\1${value//\//\\/}\2/g" < $infile > $outfile
+    if [ $empty_value == true ]
+    then
+        sed -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)/\1${value//\//\\/}/g" < $infile > $outfile
+    else
+        sed -e "s/^\(\ *$varname\ *=\{1,2\}\ *\)[^!]*[^! ]\(.*\)/\1${value//\//\\/}\2/g" < $infile > $outfile
+    fi
 fi
 
