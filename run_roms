@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.0.2
+VERSION=1.1
 
 ########################################################################
 #
@@ -27,6 +27,7 @@ VERSION=1.0.2
 # 1.0.1  multiple -b arguments are all passed on without overwriting
 # 1.0.2  added check for existance of obsfile if use_verification is
 #        active
+# 1.1    added support for optional modfile variable
 ########################################################################
 
 ########################################################################
@@ -380,7 +381,19 @@ if [[ $use_verification == true ]]; then
     else
         rif_setvar "$da_in_local" OBSname "$obsfile"
     fi
-    rif_setvar "$da_in_local" MODname "$(printf "$output_dir_files/$outputfile_mask" mod )"
+    # optional user-supplied modfile variable
+    if [[ -n "$modfile" ]]; then
+        # if path is specified, use that
+        if [[ "$modfile" =~ ^.*/.*$ ]]; then
+            modfile_local="$modfile"
+        else
+            modfile_local="$output_dir_files/$modfile"
+        fi
+    else
+        modfile_local="$(printf "$output_dir_files/$outputfile_mask" mod )"
+    fi
+    echo "   setting mod-file name to \"$modfile_local\""
+    rif_setvar "$da_in_local" MODname "$modfile_local"
 fi
 
 np=$(rif_getvar $ocean_in_local NtileI)
