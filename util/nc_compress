@@ -1,7 +1,7 @@
 #!/bin/bash
 # written by Jann Paul Mattern
 
-VERSION=1.8
+VERSION=2.1
 
 # VERSION history
 # 1.1    added preservation of file attributes
@@ -26,6 +26,11 @@ VERSION=1.8
 # 1.8    fixed bug that could leave original file
 #        changed if an error occured during packing;
 #        improved temporary file names
+# 1.9    improved error message when nccopy operation fails
+# 2.0    new option to deflate variables in batches to reduce memory usage
+#        new cleanup function with trap statement
+#        use of raise_error function
+# 2.1    more unicode characters
 
 deflatelevel=1
 nicelevel=10
@@ -41,6 +46,8 @@ sim=false
 printonly=false
 checkispacked=false
 timeit=false
+batch_deflate=false
+batch_deflate_size=25
 
 unpackifpacked=false
 packonly=false
@@ -54,9 +61,15 @@ variables_pack_input=""
 
 ncfiles=()
 
+function raise_error()
+{
+echo "ERROR — $1" >&2
+exit 1
+}
+
 function help()
 {
-echo "usage: nc_compress [optional arguments] infiles
+echo "usage: nc_compress [optional arguments] netcdffiles
 
 Compress (deflate) and pack netCDF files and convert netCDF3 files to netCDF4 format.
 
@@ -93,11 +106,20 @@ optional arguments:
   --skippacking             Skip packing for files that contain variables which
                             are already packed (only active if packing is activated
                             via --pack or --packonly).
+  -b, --batch-deflate       Do not deflate the full file/all variables at once, but
+                            deflate them in batches. This option can reduce memory
+                            usage and can prevent out of memory conditions for large
+                            netCDF files.
+  --batch-size SIZE         Set the number of variables to be processed together when
+                            -b/--batch is active (default: $batch_deflate_size).
   -a, --archive             Shorthand for
                             \"--skipcompression --pack --unpackifpacked --skippacking\"
                             (options may be subject to change in future versions).
   -A, --archive-slow        Shorthand for
                             \"--pack --unpackifpacked\"
+                            (options may be subject to change in future versions).
+  -L, --large-file-archive  Shorthand for
+                            \"--skipcompression --pack --unpackifpacked --skippacking --batch-deflate\"
                             (options may be subject to change in future versions).
   --pp PP, --packpolicy PP  Set packing policy for packing to PP
                             (default: \"$packpolicy\", see ncpdq help for information).
@@ -112,9 +134,9 @@ optional arguments:
   -i, --inflate             Shorthand for \"--deflatelevel 0 --noshuffle\".
   -l, --skiplinks           Skip files that are links.
   -s, --sim                 Perform a dry run: only create printed output but do not
+                            modify files.
   --ispacked                Quit with status 0 if first file is packed, with status 1
                             otherwise (for use in if statements in bash scripts).
-                            modify files.
   -t, --time                Print the duration of each compression or packing
                             operation.
   -v, --version             Print \"version $VERSION\" and exit.
@@ -156,6 +178,15 @@ do
             packonly=true
             shift
             ;;
+        -b | --batch | --batch-deflate )
+            batch_deflate=true
+            shift
+            ;;
+        --batch-size )
+            [[ $2 =~ ^[0-9]{1,}$ ]] || raise_error "invalid batch size \"${2}\"."
+            batch_deflate_size=$2
+            shift 2
+            ;;
         --forcepacking)
             carefulpacking=false
             shift
@@ -184,6 +215,14 @@ do
             pack=true
             skipcompression=true
             skippacking=true
+            shift
+            ;;
+        -L | --large-file-archive)
+            unpackifpacked=true
+            pack=true
+            skipcompression=true
+            skippacking=true
+            batch_deflate=true
             shift
             ;;
         -A | --archive-slow)
@@ -250,9 +289,8 @@ do
             break
             ;;
         -*)
-            echo "$(tput setaf 1)ERROR -- Unknown option: $1$(tput sgr0)" >&2
             help
-            exit 1
+            raise_error "Unknown option: $1"
             shift
             ;;
         *)  # netcdf files
@@ -271,19 +309,26 @@ if $shuffle; then
     nccopy_args="$nccopy_args -s"
 fi
 
+if [[ $batch_deflate == true ]] && [[ $batch_deflate_size == 0 ]]; then
+    [[ $debug == true ]] && echo "Turning off batch-deflation due to batch size of 0."
+    batch_deflate=false
+fi
+
 if $debug; then
-    echo "deflatelevel: $deflatelevel"
-    echo "nicelevel:    $nicelevel"
-    echo "shuffle: $shuffle"
-    echo "skipnc4: $skipnc4"
-    echo "verbose: $verbose"
-    echo "ncfiles: ${ncfiles[@]}"
-    echo "nccopy_args: \"$nccopy_args\""
+    echo "
+  deflatelevel: $deflatelevel
+     nicelevel: $nicelevel
+       shuffle: $shuffle
+       skipnc4: $skipnc4
+ batch_deflate: $batch_deflate
+    batch size: $batch_deflate_size
+       verbose: $verbose
+       ncfiles: ${ncfiles[@]}
+   nccopy_args: \"$nccopy_args\""
 fi
 
 if [[ ! $deflatelevel =~ ^[0-9]$ ]]; then
-    echo "ERROR -- Invalid deflate level \"$deflatelevel\"." >&2
-    exit 1
+    raise_error "Invalid deflate level \"$deflatelevel\"."
 fi
 
 deflatingorinflating=deflating
@@ -296,26 +341,26 @@ fi
 for nc in ${ncfiles[@]}; do
     if [[ ! -f "$nc" ]]; then
         if $verbose; then
-            echo " ! \"$nc\" is not a regular file -- skipping"
+            echo " ! \"$nc\" is not a regular file — skipping"
         fi
         continue
     fi
     if [[ $skiplinks == true ]] && [[ -L "$nc" ]]; then
         if $verbose; then
-            echo " ! \"$nc\" is a link -- skipping"
+            echo " ! \"$nc\" is a link — skipping"
         fi
         continue
     fi
     format="$(ncdump -k "$nc" 2> /dev/null )"
     if [[ "$?" -ne "0" ]]; then
         if $verbose; then
-            echo " ! \"$nc\" is not a netCDF file -- skipping"
+            echo " ! \"$nc\" is not a netCDF file — skipping"
         fi
         continue
     fi
     if [[ -z "$format" ]]; then
         if $verbose; then
-            echo " ! cannot determine file type of \"$nc\" -- skipping"
+            echo " ! cannot determine file type of \"$nc\" — skipping"
         fi
         continue
     fi
@@ -373,6 +418,21 @@ for nc in ${ncfiles[@]}; do
             nc_tmp2="${nc_tmp//.tmp/.$(tr 123456789 abcdefghij <<< $counter).tmp}"
         done
     fi
+    nc_tmp3="${nc_tmp//.tmp/.b.tmp}"
+    if [[ -f "$nc_tmp3" ]]; then
+        counter=1
+        while [[ -f "$nc_tmp" ]]; do
+            ((counter+=1))
+            nc_tmp3="${nc_tmp//.tmp/.$(tr 123456789 abcdefghij <<< $counter).tmp}"
+        done
+    fi
+
+    cleanup() {
+        [[ $debug == true ]] && echo "removing temporary files"
+        rm -f "$nc_tmp" "$nc_tmp2" "$nc_tmp3"
+    }
+
+    trap cleanup EXIT
 
     perform_nccopy=true
     # do not nccopy if --packonly is active
@@ -402,6 +462,7 @@ for nc in ${ncfiles[@]}; do
         echo "   temporary file names:
       \"$nc_tmp\"
       \"$nc_tmp2\"
+      \"$nc_tmp3\"
 
     perform_nccopy=$perform_nccopy
     perform_unpack=$perform_unpack
@@ -410,7 +471,7 @@ for nc in ${ncfiles[@]}; do
 
     if [[ $perform_nccopy == false ]] && [[ $perform_pack == false ]]; then
         if $verbose; then
-            echo "   not performing compression or packing -- skipping"
+            echo "   not performing compression or packing — skipping"
         fi
         continue
     fi
@@ -432,9 +493,7 @@ for nc in ${ncfiles[@]}; do
         if [[ $sim == false ]]; then
             nice -n $nicelevel ncpdq --unpack "$sour" "$dest"
             if [[ "$?" -ne "0" ]]; then
-                echo "ERROR -- something went wrong during ncpdq operation." >&2
-                rm -f "$nc_tmp" "$nc_tmp2"
-                exit 1
+                raise_error "something went wrong during ncpdq operation."
             fi
         fi
         sour="$dest"
@@ -443,15 +502,66 @@ for nc in ${ncfiles[@]}; do
     fi
     if $perform_nccopy; then
         if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
-            echo "   ($step) $deflatingorinflating file"
+            if [[ $batch_deflate ]]; then
+                echo "   ($step) $deflatingorinflating file (batch size $batch_deflate_size)"
+            else
+                echo "   ($step) $deflatingorinflating file"
+            fi
             ((step++))
         fi
         if [[ $sim == false ]]; then
-            nice -n $nicelevel nccopy $nccopy_args "$sour" "$dest"
-            if [[ "$?" -ne "0" ]]; then
-                echo "ERROR -- something went wrong during nccopy operation." >&2
-                rm -f "$nc_tmp" "$nc_tmp2"
-                exit 1
+            # check available space and compare to file size
+            space_avail=$( df -P "$sour" | tail -1 | tr -s ' ' | cut -d ' ' -f 4 )
+            file_size=$( du "$sour" | tr '\t' ' ' | tr -s ' ' | cut -d ' ' -f 1 )
+            percent_uptake=$(( $file_size * 100 / $space_avail ))
+            if $debug; then
+                echo "space_avail=${space_avail}, file_size=${file_size}, percent_uptake=${percent_uptake}"
+            fi
+            [[ $percent_uptake > 90 ]] && echo "WARNING — the nccopy operation may take up ${percent_uptake}% of the available disk space."
+
+            if [[ $batch_deflate ]]; then
+                # only pack variables with 3 or more dimensions
+                #     the {2,} counts the number of commas (number of dimensions - 1)
+                variables_large="$(ncdump -h "$sour" | sed -n -r "s/^\s*[a-z]+ +(\w+) *\(([^,]+,){2,}[^,]+\) *;.*/\1/p" | tr '\n' ',' )"
+                num_large=$(tr -dc ',' <<< "$variables_large" | wc -c)
+                variables_large="${variables_large%,}"
+                [[ $debug == true ]] && echo "$num_large \"large\" variables: $variables_large"
+
+                [[ $debug == true ]] && echo "creating base file \"$dest\" with \"small\" variables"
+                ncks -O -x -v "$variables_large" "$sour" "$nc_tmp3"
+                if [[ "$?" -ne "0" ]]; then
+                    raise_error "something went wrong during ncks operation (creating base file)."
+                fi
+                nice -n $nicelevel nccopy $nccopy_args "$nc_tmp3" "$dest"
+                if [[ "$?" -ne "0" ]]; then
+                    raise_error "something went wrong during nccopy operation (creating base file)."
+                fi
+                rm -f "$nc_tmp3"
+
+                if [[ $batch_deflate_size == 1 ]]; then
+                    vars=( $(tr ',' ' ' <<< $variables_large) )
+                else
+                    vars=( $(sed -r "s/(([^,]*,){$(( ${batch_deflate_size}-1 ))}([^,]*)),/\1 /g" <<< $variables_large) )
+                fi
+                for var in ${vars[@]} ; do
+                    [[ $debug == true ]] && echo "batch-deflating variable(s) \"$var\""
+                    nice -n $nicelevel nccopy $nccopy_args -V "$var" "$sour" "$nc_tmp3"
+                    if [[ "$?" -ne "0" ]]; then
+                        raise_error "something went wrong during nccopy operation (processing \"$var\")."
+                    fi
+                    ncks -A -h -v "$var" "$nc_tmp3" "$dest"
+                    if [[ "$?" -ne "0" ]]; then
+                        raise_error "something went wrong during ncks operation (processing \"$var\")."
+                    fi
+                    rm -f "$nc_tmp3"
+                done
+            else
+                nice -n $nicelevel nccopy $nccopy_args "$sour" "$dest"
+                if [[ "$?" -ne "0" ]]; then
+                    df_out=( $(df -Ph "$sour" | tail -1) )
+                    echo "Space remaining on file system ${df_out[0]} (mounted on ${df_out[5]}): ${df_out[3]} (${df_out[4]} capacity)."
+                    raise_error "something went wrong during nccopy operation."
+                fi
             fi
         fi
         sour="$dest"
@@ -516,22 +626,18 @@ for nc in ${ncfiles[@]}; do
                                 sour="$nc_tmp2"
                                 if [[ $sour == $dest ]]; then
                                     # this should not happen, remove this check after some testing
-                                    echo "ERROR -- internal error." >&2
                                     if $debug; then
                                         echo "sour=\"$sour\", dest=\"$dest\""
                                     fi
-                                    rm -f "$nc_tmp" "$nc_tmp2"
-                                    exit 1
+                                    raise_error "internal error."
                                 fi
                             fi
                             nice -n $nicelevel ncatted $ncatted_args "$sour"
                             if [[ "$?" -ne "0" ]]; then
-                                echo "ERROR -- something went wrong during ncatted operation." >&2
                                 if $debug; then
                                     echo "ncatted_args=\"$ncatted_args\""
                                 fi
-                                rm -f "$nc_tmp" "$nc_tmp2"
-                                exit 1
+                                raise_error "something went wrong during ncatted operation."
                             fi
                         fi
                     fi
@@ -540,18 +646,14 @@ for nc in ${ncfiles[@]}; do
                     fi
                     nice -n $nicelevel ncpdq -C -O -v "$variables_pack" "$sour" "$dest"
                     if [[ "$?" -ne "0" ]]; then
-                        echo "ERROR -- something went wrong during ncpdq operation." >&2
-                        rm -f "$nc_tmp" "$nc_tmp2"
-                        exit 1
+                        raise_error "something went wrong during ncpdq operation."
                     fi
                     if $debug; then
                         echo "appending remaining variables"
                     fi
                     nice -n $nicelevel ncks -C -A -x -v "$variables_pack" "$sour" "$dest"
                     if [[ "$?" -ne "0" ]]; then
-                        echo "ERROR -- something went wrong during ncks operation." >&2
-                        rm -f "$nc_tmp" "$nc_tmp2"
-                        exit 1
+                        raise_error "something went wrong during ncks operation."
                     fi
                 fi
             else
@@ -562,9 +664,7 @@ for nc in ${ncfiles[@]}; do
                 nice -n $nicelevel ncpdq -O -P "$packpolicy" "$sour" "$dest"
             fi
             if [[ "$?" -ne "0" ]]; then
-                echo "ERROR -- something went wrong during ncpdq operation." >&2
-                rm -f "$nc_tmp" "$nc_tmp2"
-                exit 1
+                raise_error "something went wrong during ncpdq operation."
             fi
         fi
         sour="$dest"
@@ -578,10 +678,10 @@ for nc in ${ncfiles[@]}; do
             fi
             mv "$sour" "$nc"
         fi
-        rm -f "$nc_tmp" "$nc_tmp2"
+        cleanup()
         if [[ $verbose == true ]] || [[ $semiverbose == true ]]; then
             size_new="$(wc -c < "$nc")"
-            printf "   created a %2.1f%% reduction in file size (%d -> %d)\n" "$(bc -l <<< "100*(1-$size_new/$size_old)")" "$size_old" "$size_new"
+            printf "   created a %2.1f%% reduction in file size (%d → %d)\n" "$(bc -l <<< "100*(1-$size_new/$size_old)")" "$size_old" "$size_new"
         fi
         if [[ $timeit == true ]]; then
             duration=$SECONDS
@@ -590,7 +690,7 @@ for nc in ${ncfiles[@]}; do
             TZ=UTC0 printf "   time elapsed during operation: %(${timeformatstr})T\n" $duration
         fi
     else
-        echo "   file was not changed -- simulation only"
+        echo "   file was not changed — simulation only"
     fi
 done
 
