@@ -660,7 +660,7 @@ for nc in ${ncfiles[@]}; do
                     fi
                     ncks -m "$dest" > /dev/null 2> /dev/null
                     if [[ "$?" -ne "0" ]]; then
-                        raise_error "issue detected (ncdpq or ncks created corrupted file)."
+                        raise_error "issue detected (ncdpq or ncks created corrupted file). Packing interrupted, the original file has been restored."
                     fi
                 fi
             else

@@ -813,6 +813,7 @@ if $perform_restart; then
     # look for "restart at X:Y" first where X=cycle Y=day (must be the last entry behind "starting data assimilation cycle")
     # use day to temporarily hold whole string
     day=$(egrep '(starting data assimilation cycle|restart at)' "$run_roms_logfile" | tail -n 1 | grep 'restart at')
+    [[ $debug == true ]] && echo "debug: line with restart information: \"$day\" (log-file: \"$run_roms_logfile\")"
     if [[ -n "$day" ]]; then
         day="$(sed -n "s/.*restart  *at  *\([0-9]\{1,\}\):\([0-9]\{1,\}\).*/\1:\2/p" <<< "$day")"
         echo "restart: using restart information in run_roms_da log file: \"$day\""
