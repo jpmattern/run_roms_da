@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.1.2
+VERSION=1.2
 
 ########################################################################
 #
@@ -34,6 +34,7 @@ VERSION=1.1.2
 # 1.1       added support for non-integer start and stop day
 # 1.1.1     bugfixes related to changes in 1.1
 # 1.1.2     bugfix for -e/--extend option
+# 1.2       added support for "ini_file_directory" in configuration
 ########################################################################
 
 ########################################################################
@@ -1047,7 +1048,27 @@ while [[ $(bc <<< "$day < $stop_day") == 1 ]]; do
 
     # initial conditions file
 
-    if [[ $(bc <<< "$day == $start_day") == 1 ]]; then
+    if [[ -n "$ini_file_directory" ]]; then
+        # if ini_file_directory is set in configuration, use that to source a
+        # new initial file every cycle
+        # if there is no initial file in ini_file_directory for the first cycle, use
+        # ini_file instead
+        if [[ ! -f ${ini_file_directory}/$ini_file_local ]]; then
+            # if file cannot be found in first cycle, use $ini_file
+            if [[ $(bc <<< "$day == $start_day") == 1 ]]; then
+                echo "   Cannot find initial file \"${ini_file_directory}/$ini_file_local\", using \"$ini_file\" for first cycle instead."
+                if [[ ! -f "$ini_file" ]]; then
+                    raise_error "Cannot find initial file \"$ini_file\"."
+                fi
+                cp -p "$ini_file" $ini_file_local
+            else
+                raise_error "Cannot find initial file \"${ini_file_directory}/$ini_file_local\"."
+            fi
+        else
+            echo "   copying initial file from \"${ini_file_directory}/$ini_file_local\""
+            cp -p ${ini_file_directory}/$ini_file_local .
+        fi
+    elif [[ $(bc <<< "$day == $start_day") == 1 ]]; then
         if [[ ! -f "$ini_file" ]]; then
             raise_error "Cannot find initial file \"$ini_file\"."
         fi
