@@ -9,7 +9,7 @@
 #                                                                      #
 ########################################################################
 
-VERSION=1.3
+VERSION=1.4
 
 ########################################################################
 #
@@ -36,6 +36,7 @@ VERSION=1.3
 # 1.1.2     bugfix for -e/--extend option
 # 1.2       added support for "ini_file_directory" in configuration
 # 1.3       added support for "ini_file_variables" in configuration
+# 1.4       new sacct report if slurm job fails
 ########################################################################
 
 ########################################################################
@@ -854,7 +855,7 @@ if $perform_restart; then
             echo "debug: querying logfile=$logfile"
         fi
         day=$(sed -nr "1,2000 s/^ *([0-9.]+) +dstart .*/\1/p" < "$logfile")
-        day=$(bc <<< "$day+$day_offset")
+        [[ -n "$day" ]] && day=$(bc <<< "$day+$day_offset")
         # day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • running .* algorithm, starting day:  *([0-9.]+).*/\1/p" | tail -n 1)
         day_log=$(tail -n 200 "$run_roms_logfile" | sed -nr "s/^ • starting data assimilation cycle.*day *([0-9.]+).*/\1/p" | tail -n 1)
         if $debug; then
@@ -1502,6 +1503,18 @@ mpirun -np $num_nodes -machinefile $machinefile -host "$machines" $executable $o
                 sleep 10s
             done
             echo "   batch job $sbatch_jobid terminated"
+
+            # check job using sacct
+            # only run if sacct is installed (check using command -v)
+            command -v sacct >/dev/null 2>&1
+            if [[ $? == 0 ]]; then
+                if [[ -n "$(sacct --job=$sbatch_jobid --format="state" | grep -i failed )" ]]; then
+                    echo " ! report from \"sacct\" indicates \"failed\" state"
+                    sacct --job=$sbatch_jobid --format="jobid,nodelist,cputime,start,end,partition,alloccpus,state,exitcode"
+                fi
+            else
+                echo "   cannot check job state using \"sacct\""
+            fi
         fi
         /bin/rm -f "$sbatch_file"
     elif [[ $roms_startmode == mpirun-plain ]]; then
